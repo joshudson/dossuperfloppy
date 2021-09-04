@@ -1,0 +1,46 @@
+                        Hard Disk as Superfloppy Tools
+
+Tools for preparing a hard disk with a superfloppy format for use with DOS
+operating systems.
+
+Requirements:
+ * 8086 PC with 128kb RAM
+ * MS-DOS 3.31 or newer
+ * Hard Disk (duh)
+ * BIOS service int 13h ah=08h that works (no EZDrive)
+
+It was published at https://retrocomputing.stackexchange.com/a/20309/418 that
+it has long been known that DOS or Windows 9x can be patched to be able to
+access a hard disk formatted with a single giant FAT filesystem.
+
+This is convenient because it is then possible to mount the filesystem from
+the host operating system and copy files in and out without messing with offset
+or any other such nonsense. This also saves 31KB of disk space.
+
+This project sets up the filesystem from inside operating system rather
+than from any host operating system (and thus should work on bare hardware).
+
+Installation instructions for a VM guest:
+
+ALL DATA ON THE TARGET DISK WILL BE ERASED.
+
+1: Prepare a MS-DOS boot floppy for the version of DOS you want to install.
+   You will need FORMAT.COM and SYS.COM and whatever to access install media.
+2: Copy PATCHDOS.COM and FORMATHD.COM to it.
+3: Boot the floppy.
+4: Run PATCHDOS.COM A:\IO.SYS
+5: Run FORMATHD.COM 0 /16
+6: Boot the floppy again
+7: Run FORMATHD.COM 0 C:
+8: Boot the hard disk
+9: Install DOS
+10: If DOS doesn't boot after install,
+    Boot the floppy again
+11: Run PATCHDOS.COM C:\IO.SYS
+
+If preparing on a physical machine, you will need to know the BIOS disk ID
+and what drive letter the hard disk will end up on. It would be wise to
+disconnect any other hard disks so you end up with 0 and C: to avoid risk
+of data loss.
+
+Copyright (C) Joshua Hudson 2021, Licensed under CC-BY-SA 4.0

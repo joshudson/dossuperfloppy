@@ -1,0 +1,15 @@
+*.COM
+*.EXE
+*.SYS
+*.16
+*.img
+*.iso
+*.bak
+*.tmp
+debug.txt
+qemu*.sh
+LICENSE.TXT
+README.TXT
+junk
+junk.asm
+
