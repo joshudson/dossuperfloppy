@@ -6,6 +6,8 @@
 *.iso
 *.bak
 *.tmp
+*.zip
+*.ZIP
 debug.txt
 qemu*.sh
 LICENSE.TXT
