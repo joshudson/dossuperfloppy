@@ -2,6 +2,7 @@
 *.EXE
 *.SYS
 *.16
+*.32
 *.img
 *.iso
 *.bak

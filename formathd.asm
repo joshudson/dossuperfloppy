@@ -18,8 +18,8 @@ bootdrive	equ	0x01BE
 secondsector	equ	firstsector + 512
 searchsector	equ	secondsector + 512
 parameter	equ	searchsector + 512
-savedsp		equ	parameter + 32
-biosdisk	equ	savedsp + 2
+savedsp		equ	parameter + 32	; PUN: both saved space or saved sp register depending on context
+biosdisk	equ	savedsp + 4
 sloppypatch	equ	biosdisk + 1	; Currently unused but keeps alignment
 dapatchtmp	equ	sloppypatch + 1
 ;dapatchtmp is 6 bytes long
@@ -34,6 +34,8 @@ dapatchtmp	equ	sloppypatch + 1
 %define mybpb_rootdirentries	bp + 0x198
 %define mybpbtmp_nheads		bp + 0x194
 %define mybpbtmp_nsectors	bp + 0x192
+%define reserveddx		0x798
+%define reservedcx		0x79A
 
 
 _start:
@@ -45,8 +47,8 @@ _start:
 	cld
 	mov	bl, [0x0080]
 	mov	bh, 0
-	mov	[bx + 0x0081], byte 0
 	mov	si, 0x0081
+	mov	[bx + si], byte 0
 .next	lodsb
 	cmp	al, 0
 	je	short	.nope
@@ -106,38 +108,36 @@ _start:
 	cmp	al, ' '
 	jne	short	.nope
 	add	si, 2
-	;TODO parse options (should any appear)
 .endoptions:
 	jmp	format
 
 prephd32:
-	mov	dx, msg_nofat32
-	jmp	errormsg
+	add	si, 2
+	lodsb
+	cmp	al, 0
+	jne	short	.nope
+	mov	[partitiontype], byte 0x0B	; FAT32
+	jmp	short	prephd
+.nope	jmp	_start.nope
 
 prephd16:
 	; Should we adjust partition type for < 65536 sectors? Nah. use the lastest format.
+	add	si, 2
+.spl	lodsb
+	cmp	al, ' '
+	je	short	.spl
+	cmp	al, 0
+	je	short	prephd
+	dec	si
+	cmp	[si], word '/1'
+	jne	short	prephd32.nope
+	mov	[persistflags], byte 1
 
 prephd:
 	; Check if drive size is good (no INT13h extensions = must be good)
-	mov	dl, [biosdisk]
-	mov	dh, 0
-	mov	si, parameter
-	mov	[si], word 0x1E
-	mov	ah, 0x48
-	int	0x13
-	jc	short	prephdmbr
-	cmp	[si + 1], byte 0
-	jne	.big
-	cmp	[si], byte 0x1A
-	jb	short	prephdmbr
-.big	cmp	[si + 0x18], word 512
-	je	short	prephdmbr
-	mov	dx, msg_not512
-	jmp	errormsg
+	call	diskparam
 
 	; Build the MBR sector
-prephdmbr:
-	mov	dl, [biosdisk]		; 0x13 0x1A overwrote DL
 	mov	si, _errormbrstart
 	mov	di, firstsector
 	push	di
@@ -149,13 +149,9 @@ prephdmbr:
 	xor	ax, ax
 	rep	stosw
 	call	makepartitiontable
-	mov	dh, 0
-	mov	cx, 0x0001
 	pop	bx
-	mov	ax, 0x0301
-	int	0x13
-	jc	.io
-	mov	bx, secondsector
+	call	savefirstsector
+	mov	bx, secondsector	; Fill the rest of the first track with zeros
 	push	cx
 	mov	di, bx
 	xor	ax, ax
@@ -182,7 +178,7 @@ format:
 	mov	bx, firstsector
 	call	loadfirstsector
 	call	checkbx
-	je	short	already
+	je	short	.alread
 	call	checkbxmbr
 	jc	.badmbr
 	mov	si, firstsector + 0xDA
@@ -194,28 +190,73 @@ format:
 	mov	bx, secondsector
 	call	loadfirstsector
 	call	checkbx
-	jne	short	nogood
-	; TODO: check for space in reserved sectors
+	jne	short	.nogood
+	call	getreservedsectorcount
+	; Check for usable reserved sector
+	xchg	ax, si
+	mov	cx, 2	; Second sector isn't usable no matter what
+	mov	dh, 0
+	mov	dl, [biosdisk]
+	mov	bx, searchsector
+.nrsv	inc	cx
+	cmp	cx, si
+	jae	.noreserved
+	mov	ax, 0x0201
+	int	0x13
+	jc	.nrsv	; Bad sector or sector number > sectors per track
+	mov	di, bx
+	; Check for rep WORD
+	push	cx
+	mov	cx, 256
+	mov	ax, [di]
+	repe	scasw
+	pop	cx
+	jne	short	.nrsv
+	jmp	short	.reserved
+.alread	mov	dx, msg_already
+	jmp	.emsg
+.nogood	mov	dx, msg_nogood
+.emsg	jmp	errormsg
+.noreserved:
 	mov	ax, [secondsector + 0x16]
-	cmp	[secondsector + 0x16], word 0
-	je	fat32noreserve
+	cmp	[secondsector + 0x16], word 0	; FAT32
+	je	short	fat32noreserve
 	call	patchfirstsector_b16
-	mov	al, [transflags]
-	test	al, 0x80
-	jnz	toexiterror
+	test	[transflags], byte 0x80
+	jnz	short	.toexiterror
 	mov	bp, firstsector
 	mov	[secondsector], byte 0xEB	; JMP SHORT
 	mov	al, [mybpb_lenstockbpb]
 	inc	al
 	mov	[secondsector + 1], al
+.savebootsector:
 	mov	al, [persistflags]
 	mov	[secondsector + 2], byte al	; Only place we can save something (darn!)
+	test	[transflags], byte 0x10
+	jnz	.srsv
 	call	saveboot16
-	call	savefirstsector
+	jmp	short	.sfs
+.srsv	call	savereserved
+.sfs	call	savefirstsector
 	mov	ax, 0x4C00
 	int	0x21
 .badmbr mov	dx, msg_badmbr
 	jmp	errormsg
+.toexiterror:
+	jmp	exit_error
+.reserved:
+	call	savereservedregs
+	call	patchfirstsector_reserved
+	call	makereservedsig
+	cmp	[secondsector], byte 0xE9	; JMP NEAR
+	jne	.reservedshort
+	mov	ax, [secondsector + 1]
+	inc	ax
+	mov	[secondsector + 1], al
+	mov	[secondsector], byte 0xEB	; JMP SHORT
+.reservedshort:
+	or	[transflags], byte 0x10
+	jmp	short	.savebootsector
 
 errorcode:
 	shl	ax, 1
@@ -224,27 +265,22 @@ errorcode:
 errormsg:
 	mov	ah, 9
 	int	0x21
-toexiterror:
-	jmp	exit_error
+	mov	ax, 0x4C01
+	int	0x21
+
 fat32noreserve:
+	mov	dx, msg_noreserve
+	jmp	short	errormsg
 fat32noreserve2:
-	; TODO change error message when we have FAT32
-	mov	dx, msg_nofat32
+	mov	dx, msg_noreserve2
 	jmp	short	errormsg
 	
-already:
-	mov	dx, msg_already
-	jmp	short	errormsg
-
-nogood:
-	mov	dx, msg_nogood
-	jmp	short	errormsg
-
 fixboot:
 	mov	bx, secondsector
 	call	loadfirstsector
 	mov	si, bx
 	mov	di, firstsector
+	mov	bp, di
 	mov	cx, 256
 	rep	movsw
 	call	checkbx
@@ -253,21 +289,92 @@ fixboot:
 	; 2: It can be overwritten by a new MBR loader
 	; If they both go wrong at once there's no recovery from here
 	je	short	.isbootloader
-	or	[transflags], byte 0x60
-	mov	bp, firstsector
-	; TODO we can streight up check the high data and see if the reserved sector
-	; is any good
-	jmp	short	.prepboot
+	or	[transflags], byte 0x40		; Don't write BOOT.16 it's already correct
+	; If we find reserved sector data, use it
+	xor	ax, ax
+	cmp	[bp + boot16 - 0x0600 + 8], ax
+	jne	short	.usesboot16
+	cmp	[bp + reservedcx - 0x0600], ax
+	je	short	.usesboot16
+	mov	dl, [biosdisk]
+	mov	dh, [firstsector + reserveddx + 1 - 0x0600]
+	mov	cx, [firstsector + reservedcx - 0x0600]
+	mov	ax, 0x0201
+	int	0x13
+	jnc	short	.prepbootrsv_mbr
+.tio0	jmp	ioerror
+.usesboot16:
+	call	regenfirstsector_b16
+	jmp	.prepboot_b16
+.prepbootrsv_mbr:
+	; Regenerate BPB from copy saved in second sector and high data
+	mov	ch, 0
+	mov	cl, [secondsector + 1]
+	add	cl, 2		; Has to be <= 0xD4
+	mov	si, secondsector
+	mov	di, bp
+	rep	movsb
+	mov	[bp + 2], byte 0x90
+	mov	si, firstsector + boot16 - 0x600
+	mov	di, firstsector + 4
+	movsw
+	movsw
+	movsw
+	movsw
+	or	[transflags], byte 0x40		; Don't write back reserved sector
+	jmp	short	.prepbootrsv2
+.alreadyfixed:
+	jmp	format.alread
 .isbootloader:
-	;TODO try to find bootloader location in reserved sectors
-	cmp	[secondsector + 0x16], word 0
-	je	fat32noreserve2
+	mov	bx, firstsector
+	call	checkbxmbr
+	jnc	short	.alreadyfixed
+	; Try to find our reserved sector signature
+	call	getreservedsectorcount
+	; Check for usable reserved sector
+	push	bp
+	xchg	ax, bp
+	mov	cx, 2	; Second sector isn't usable no matter what
+	mov	dh, 0
+	mov	dl, [biosdisk]
+	mov	bx, searchsector
+.nrsv	inc	cx
+	cmp	cx, bp
+	jae	short	.noreserved
+	mov	ax, 0x0201
+	int	0x13
+	jc	short	.nrsv	; Bad sector or sector number > sectors per track
+	lea	di, [bx + 4]
+	mov	si, bootloadsig
+	push	cx
+	mov	cx, 4
+	rep	cmpsw
+	pop	cx
+	jne	short	.nrsv
+	pop	bp
+	push	cx		; Located our reserved sector
+	push	dx		; save boot image here
+	call	savereservedregs
+	call	makereservedsig
+	mov	di, firstsector + 0xDA
+	xor	ax, ax		; The unique disk is lost -- zero it
+	stosw			; So Windows 9x can recreate it
+	stosw
+	stosw
+.prepbootrsv2:
+	call	regenfirstsector_reserved
+	jmp	short	.tprepmore
+.noreserved:
+	pop	bp
+	cmp	[secondsector + 0x16], word 0	; FAT32
+	je	short	.noreservederror
 	call	patchfirstsector_b16	; Generate first sector
-	mov	al, [transflags]
-	test	al, byte 0x80
-	jz	short	.prepboot
-	jmp	.prepnoboot
-.prepboot:
+	test	[transflags], byte 0x80
+	jz	short	.prepboot_b16
+	jmp	.prepnoboot		; Rebuild from boot sector didn't fit
+.noreservederror:
+	jmp	fat32noreserve2
+.prepboot_b16:
 	;bp now points to firstsector
 	;find BOOT.16 and check for bootability
 	mov	si, firstsector + dapatch - 0x0600
@@ -280,74 +387,67 @@ fixboot:
 	call	fat16lbaprep
 	jc	short	.tio1
 	call	.loadboot16
-	jc	short	.prepnoboot16
-	test	[transflags], byte 0xC0
-	jnz	.nosaveregswriteback
-	push	cx		; Save BIOS parameters for writing it back
-	push	dx
-.nosaveregswriteback:
-	mov	al, [searchsector + 2]
-	mov	[persistflags], al
-	jmp	short	.prepmore
-
-.noboot16norec:
-	mov	dx, str_missing
-	jmp	errormsg		; NOT RECOVERABLE
-.prepnoboot16:
-	test	[transflags], byte 0x20
-	jnz	.noboot16norec
-	mov	dx, msg_bootfile
-	or	[transflags], byte 0x80
-.prepnoboot:
-	mov	di, [mybpb_lenstockbpb]
-	add	di, firstsector + 3
-	call	patchfirstsector_noboot_dxmsg
-.prepmore:
-	test	[transflags], byte 0x20
-	jnz	.prepnewmbr
-	mov	bx, firstsector
-	call	checkbxmbr
-	jnc	short	.alreadyfixed
-	mov	dl, [biosdisk]
 	mov	si, dapatchtmp
 	mov	di, firstsector + dapatch - 0x0600
 	movsw
 	movsw
 	movsw
-	mov	di, firstsector + 0x1B0
-	;TODO check for FAT32 (for setting partition type)
-	call	makepartitiontable
+	jc	short	.prepnoboot16
+	test	[transflags], byte 0x80
+	jnz	.nosaveregswriteback
+	test	[transflags], byte 0x40
+	jz	.notbpbtofirst
+	mov	si, secondsector
+	mov	di, firstsector
+	mov	cx, [mybpb_lenstockbpb]
+	add	cl, 3
+	rep	movsb
+	mov	[firstsector + 2], byte 0x90
+	; Will always take the jnz below
+.notbpbtofirst:
+	test	[transflags], byte 0xC0
+	jnz	.nosaveregswriteback
+	push	cx		; Save BIOS parameters for writing it back
+	push	dx
+.nosaveregswriteback:
+.tprepmore:
+	jmp	short	.prepmore
+.prepnoboot16:
+	mov	dx, msg_bootfile
+	or	[transflags], byte 0x80
+.prepnoboot:
+	mov	di, [mybpb_lenstockbpb]	; Repaired FAT16 but not bootable
+	add	di, firstsector + 3
+	call	patchfirstsector_noboot_dxmsg
+.prepmore:
+	mov	al, [secondsector + 2]
+	mov	[persistflags], al
+	mov	di, firstsector + 0x1BE
+	cmp	[secondsector + 0x16], word 0	; FAT32
+	jne	short	.nptype
+	mov	[partitiontype], byte 0x0B	; FAT32
+.nptype	call	makepartitiontable
 	mov	al, [transflags]
-	test	al, byte 0xC0
+	test	al, byte 0xC0			; Flag 0x80 leaves 2 words on the stack; but it doesn't matter
 	jnz	short	.nowriteboot16
 	pop	dx
 	pop	cx
 	mov	ax, 0x0301
 	mov	bx, secondsector
-	int	0x21
+	int	0x13
 .tio1	jc	short	.ioerror
 .nowriteboot16:
-	mov	dh, 0
-	mov	dl, [biosdisk]	; DL Might be trashed
-	mov	cx, 0x0001
-	mov	ax, 0x0301
-	mov	bx, firstsector
-	int	0x13
-	jc	short	.ioerror
+	call	savefirstsector
 	mov	dx, msg_repairfinished
 	mov	ah, 9
 	int	0x21
 	mov	ax, 0x4C00
-	int	0x21
-.prepnewmbr:
-	;TODO check flag 0x10 for reserved sector
-	call	regenfirstsector_b16
-	jmp	short	.nowriteboot16
-
+	test	[transflags], byte 0x80
+	jz	.nex
+	inc	ax
+.nex	int	0x21
 .ioerror:
 	jmp	rawioerror
-.alreadyfixed:
-	jmp	already
 .loadboot16:
 	;This code is related to the search code in the bootsector but there were too many variables to make them the same
 	xor	dx, dx
@@ -390,16 +490,48 @@ fixboot:
 	jz	.nop			; Zero sectors
 	call	fat16clustertophysical
 	jc	short	.ioerror
-	mov	bx, searchsector
+	mov	bx, secondsector
 	call	fat16loadlba
 	jc	short	.ioerror
 	ret
+
+diskparam:
+	mov	dl, [biosdisk]
+	mov	dh, 0
+	mov	si, parameter
+	mov	[si], word 0x1E
+	mov	ah, 0x48
+	int	0x13
+	jc	short	.zh	; Call not supported
+	xor	ax, ax
+	cmp	[si], byte 0x1A
+	jb	short	.nc2
+	cmp	[si + 0x18], word 512
+	je	short	.nc2
+	mov	dx, msg_not512
+	jmp	errormsg
+.nc2	cmp	[si], byte 0x18
+	jb	short	.nsp
+.big2	cmp	[si + 0x16], ax
+	jne	.bigdsk
+	cmp	[si + 0x14], ax
+	jne	.bigdsk
+	mov	ax, [si + 0x10]
+	mov	[savedsp], ax
+	mov	ax, [si + 0x12]
+	mov	[savedsp + 2], ax
+	jmp	short	.ret
+.bigdsk	dec	ax
+.nsp	mov	[savedsp], ax
+	mov	[savedsp + 2], ax
+.ret	ret
+.zh	xor	ax, ax		; Save zeros so user doesn't trust it
+	jmp	short	.nsp
 
 partitiontype	db	0x06
 
 makepartitiontable:
 	; DI = output buffer
-	; DL = disk number
 	push	dx
 	mov	ax, 0x0080
 	stosw
@@ -408,7 +540,7 @@ makepartitiontable:
 	mov	al, [partitiontype]
 	stosb
 	
-	;mov	dl, [biosdisk]
+	mov	dl, [biosdisk]
 	mov	ah, 0x08
 	push	di
 	push	es
@@ -418,16 +550,38 @@ makepartitiontable:
 	jc	short	.io
 	pop	es
 	pop	di
-	mov	al, dh
-	stosb
+	test	[persistflags], byte 0x01
+	jz	.noinc
 	mov	bp, cx
+	mov	si, 0xFFC0
+	and	bp, si
+	cmp	bp, si
+	je	.noinc
+	add	ch, byte 1
+	jnc	.noinc
+	add	cl, byte 0x40
+.noinc	mov	al, dh
+	stosb
 	mov	ax, cx
 	stosw
 	xor	ax, ax
 	stosw
 	stosw
-	; TODO if FAT32LBA use size data
 	call	.complba
+	; If FAT32 use LBA size data if available
+	cmp	[partitiontype], byte 0x0B
+	jne	.nolbadisk
+	cmp	dx, [savedsp + 2]
+	ja	.nolbadisk
+	jb	.islbadisk
+	cmp	ax, [savedsp]
+	jae	.nolbadisk
+.islbadisk:
+	mov	dx, [savedsp + 2]	; LBA disk is larger - use LBA
+	mov	ax, [savedsp]
+	mov	[di - 8], byte 0x0C
+	;mov	[partitiontype], 0x0C	; Nobody else will read it
+.nolbadisk:
 	stosw
 	xchg	ax, dx
 	stosw
@@ -494,26 +648,28 @@ exit_error:
 	mov	ax, 0x4C01
 	int	21h
 
+getreservedsectorcount:
+	mov	ax, [secondsector + 0x0E]
+	mul	word [secondsector + 0x0B]
+	mov	cx, 512
+	div	cx		; AX = number of physical reserved sectors
+	mov	cx, 64		; But we will only use the first cylinder's space
+	cmp	ax, cx
+	jb	.maxok
+	mov	ax, cx
+.maxok	ret
+
 ; As much as I'd like to convert these to use int 0x25 and int 0x26,
 ; logical sectors might be bigger than physical sectors causing
 ; this code to absolutely break down.
 loadfirstsector:
 	;BX = output buffer
-	mov	dx, 0
-loadnthsector:
-	;DX = sector number starting at 0
 	mov	ax, 0x0201
-	mov	cx, dx
-	inc	cx
+	mov	cx, 0x0001
 	mov	dh, 0
 	mov	dl, [biosdisk]
 	int	0x13
-	jc	.rxerror
-	ret
-.rxerror:
-	cmp	cx, 0x01
-	je	rawioerror
-	stc
+	jc	short	rawioerror
 	ret
 
 savefirstsector:
@@ -523,7 +679,17 @@ savefirstsector:
 	mov	dh, 0
 	mov	dl, [biosdisk]
 	int	0x13
-	jc	rawioerror
+	jc	short	rawioerror
+	ret
+
+savereserved:
+	mov	bx, secondsector
+	mov	ax, 0x0301
+	mov	cx, [firstsector + reservedcx - 0x0600]
+	mov	dh, [firstsector + reserveddx + 1 - 0x0600]
+	mov	dl, [biosdisk]
+	int	0x13
+	jc	short	rawioerror
 	ret
 
 rawioerror:
@@ -531,21 +697,8 @@ rawioerror:
 	jmp	errormsg
 
 patchfirstsector_b16:
-	;According to the documentation, the first instruction must be a JMP
-	;It can either be a JMP SHORT or a JMP NEAR
-	mov	bx, secondsector
-	mov	bp, firstsector
-	cmp	[bx], byte 0xEB	; JMP SHORT
-	jne	.try2
-	mov	cl, [bx + 1]
-	mov	ch, 0
-	inc	cx
-	inc	cx
-	jmp	short	.cont
-.try2	mov	cx, [bx + 1]	; must be JMP NEAR
-	cmp	al, [bx]
-	add	cx, 3
-.cont	mov	bx, cx
+	call	getbpboffset
+	mov	bx, cx
 	sub	bx, 3
 	mov	[mybpb_lenstockbpb], bx
 	mov	si, secondsector
@@ -555,7 +708,7 @@ patchfirstsector_b16:
 	jae	short	patchfirstsector_noboot
 	mov	bx, di
 	mov	si, fat16boot
-	mov	cx, (fat16codend - fat16boot + 1) / 2
+	mov	cx, (fat16codend - fat16boot) / 2
 	rep	movsw
 	mov	si, firstsector + 0xDA
 	mov	di, firstsector + dapatch - 0x600
@@ -612,7 +765,7 @@ patchfirstsector_noboot_dxmsg:
 	rep	movsb
 	;si = errorbpbout already
 	mov	di, firstsector + 0x170
-	mov	cx, (errorbpboutend - errorbpbout + 1) / 2
+	mov	cx, (errorbpboutend - errorbpbout) / 2
 	rep	movsw
 	mov	di, firstsector + 0x190
 	mov	si, dx
@@ -628,17 +781,12 @@ regenfirstsector_b16:
 	movsw
 	movsw
 	movsw
-	mov	si, searchsector
-	mov	di, firstsector
-	mov	bp, di
-	movsw
-	mov	al, 0x90
-	stosb
-	inc	si
+	mov	di, bp
 	mov	cx, [mybpb_lenstockbpb]
-	rep	movsb
+	add	cl, 3
+	add	di, cx
 	mov	si, fat16boot
-	mov	cx, (fat16codend - fat16boot + 1) / 2
+	mov	cx, (fat16codend - fat16boot) / 2
 	rep	movsw
 	mov	si, firstsector + 0xDA
 	mov	di, firstsector + dapatch - 0x600
@@ -702,6 +850,88 @@ saveboot16:
 	pop	ax
 .error	jmp	errorcode
 
+savereservedregs:
+	push	dx
+	mov	dl, 0x80
+	mov	[firstsector + reserveddx - 0x0600], dx
+	mov	[firstsector + reservedcx - 0x0600], cx
+	pop	dx
+	ret
+
+makereservedsig:
+	mov	si, secondsector + 4
+	mov	di, firstsector + boot16 - 0x0600
+	movsw
+	movsw
+	movsw
+	movsw
+	mov	si, bootloadsig
+	mov	di, secondsector + 4
+	movsw
+	movsw
+	movsw
+	movsw
+	ret
+
+patchfirstsector_reserved:
+	call	getbpboffset
+	cmp	cx, 0xD4
+	jbe	.szok
+	jmp	patchfirstsector_noboot
+.szok	push	cx
+	mov	si, secondsector
+	mov	di, firstsector
+	rep	movsb
+	pop	cx
+	mov	di, firstsector
+	mov	si, bx
+	rep	movsb
+patchfirstsector_reserved_common:
+	mov	si, fat32boot
+	movsw
+	movsw
+	movsw
+	mov	si, fat32copy
+	mov	di, firstsector + 0xE0
+	mov	cx, (fat32copyend - fat32copy) / 2
+	rep	movsw
+	mov	si, fat32absload
+	mov	di, firstsector  + 0x100
+	mov	cx, (fat32absend - fat32absload) / 2
+	rep	movsw
+	mov	si, str_ioerror
+	mov	di, firstsector + ioerror - 0x0600
+	mov	cx, ioerrorlen
+	rep	movsb
+	xor	ax, ax			; For repair mode switcher
+	mov	di, firstsector + boot16 - 0x0600 + 8
+	stosw
+	stosw
+	ret
+
+regenfirstsector_reserved:
+	call	getbpboffset
+	mov	di, firstsector
+	add	di, cx
+	jmp	short	patchfirstsector_reserved_common
+
+getbpboffset:
+	;According to the documentation, the first instruction must be a JMP
+	;It can either be a JMP SHORT or a JMP NEAR
+	mov	bx, secondsector
+	mov	bp, firstsector
+	cmp	[bx], byte 0xEB	; JMP SHORT
+	jne	.try2
+	mov	cl, [bx + 1]
+	mov	ch, 0
+	inc	cx
+	inc	cx
+	jmp	short	.cont
+.try2	mov	cx, [bx + 1]	; must be JMP NEAR
+	cmp	al, [bx]
+	add	cx, 3
+.cont	ret
+
 checkbx:	; Check if sector pointed to by BX is DOS formatted or not
 	cmp	[bx], byte 0xEB	; JMP SHORT
 	je	.yes
@@ -720,6 +950,7 @@ checkbxmbr:	; Check if sector pointed to by BX has a our MBR on it
 
 %ifdef DEBUG
 hexax:	;DEBUG ROUTINE
+	cld
 	push	ax
 	push	dx
 	push	di
@@ -747,7 +978,7 @@ hexax:	;DEBUG ROUTINE
 .ok	stosb
 	pop	ax
 	ret
-.dope	db	0, 0, 0, 0, ' $'
+.dope	db	80, 80, 80, 80, ' $'
 
 dumpsi11:
 	push	ax
@@ -772,11 +1003,11 @@ dumpsi11:
 %endif
 
 		align 2, db 0xCC
-;bootloadsig	db	'HDSFBSIG'	; Saved for reserved sector handling
+bootloadsig	db	'HDSFBSIG'	; Saved for reserved sector handling
 persistflags	db	0
 transflags	db	0
 msg_nofat32	db	'FAT32 is not implemented yet', 13, 10, '$'
-msg_usage	db	'FORMATHD.COM, version 1.0 Copyright (C) Joshua Hudson 2021', 13, 10
+msg_usage	db	'FORMATHD.COM, version 2.0 Copyright (C) Joshua Hudson 2021', 13, 10
 		db	'FORMATHD formats the entire hard disk as a big single partition, also', 13, 10
 		db	'known as a superfloppy format. This operation must run in two phases', 13, 10
 		db	"because DOS can't reread its partition tables. You must know the BIOS", 13, 10
@@ -784,13 +1015,17 @@ msg_usage	db	'FORMATHD.COM, version 1.0 Copyright (C) Joshua Hudson 2021', 13, 1
 		db	'For obvious reasons, this tool should only be used from a boot floppy.', 13, 10
 		db	"You will need to patch IO.SYS first or the disk won't be usable.", 13, 10
 		db	'The disk is made bootable immediately.', 13, 10
-		db	'Phase 1: FOMRATHD.COM # /16 where # is the bios number (0-3)', 13, 10
+		db	'Phase 1 FAT16: FOMRATHD.COM # /16 [/1] where # is the bios number (0-3)', 13, 10
+		db	'Phase 1 FAT32: FOMRATHD.COM # /32 where # is the bios number (0-3)', 13, 10
 		db	'Phase 2: FORMATHD.COM # C: where C: is the drive that # ended up on.', 13, 10
 		db	'Repair: FORMATHD.COM # /F should the OS setup damage the MBR.', 13, 10, '$'
+		db	'/1 works around a bug in SeaBIOS that hides the last cylinder', 13, 10, '$'
 msg_endphase1	db	'Phase 1 has finished. Reboot and run FORMATHD.COM again.', 13, 10, '$'
 msg_repairfinished	db	'Repair completed', 13, 10, '$'
 msg_already	db	'Boot sector already installed', 13, 10, '$'
 msg_nogood	db	'Boot sector no good', 13, 10, '$'
+msg_noreserve	db	'FAT32 filesystem has no usable reserved sectors', 13, 10, '$'
+msg_noreserve2	db	'FAT32 recovery but reserved boot sector not found', 13, 10, '$'
 msg_badmbr	db	'MBR is no good', 13, 10, '$'
 msg_bigbpb	db	'BPB is too large; disk will not boot', 13, 10, '$'
 msg_bootfile	db	'BOOT    16  lost; disk will not boot', 13, 10, '$'
@@ -800,7 +1035,6 @@ formatexe	db	'A:\FORMAT.COM', 0
 formatcmd:	db	' '
 formatcmddrive	db	'C: /S'
 formatcmdend	db	0
-boot16file	db	'C:\BOOT.16', 0
 		align 2, db 0
 
 %include "errormsg.asm"
@@ -827,8 +1061,8 @@ errorbpbout:
 	int	0x18
 .hlt	hlt
 	jmp short .hlt
-errorbpboutend:
 	align 2, db 0xCC
+errorbpboutend:
 
 _errormbrstart:
 	xor	ax, ax
@@ -1012,8 +1246,57 @@ fat16loadlba:
 	mov	ax, 0x0201
 	int	0x13
 .ret	ret
-fat16codend:
 	align 2, db 0xCC
+fat16codend:
+
+fat32boot:
+	cld
+	jmp	0:0x7CE0
+fat32copy:
+	xor	ax, ax
+	mov	si, 0x7C00
+	mov	di, 0x0600
+	mov	bx, si
+	cli
+	mov	ss, ax
+	mov	sp, si
+	sti
+	mov	ds, ax
+	mov	es, ax
+	mov	cx, 256
+	rep	movsw
+	jmp	0:0x0700
+	align 2, db 0xCC
+fat32copyend:
+fat32absload:
+	mov	[reserveddx], dl
+	mov	dh, [reserveddx + 1]
+	mov	cx, [reservedcx]
+	mov	ax, 0x0201
+	int	0x13
+	jc	.error
+	mov	si, boot16
+	mov	di, 0x7C04
+	movsw
+	movsw
+	movsw
+	movsw
+	mov	si, 0x07BE
+	jmp	bx
+.error	mov	si, ioerror
+	mov	cx, ioerrorlen
+	mov	ah, 0x0E
+	mov	bx, 0x0007
+.loop	push	cx
+	lodsb
+	mov	cx, 1
+	int	0x10
+	pop	cx
+	loop	.loop
+.hlt	hlt
+	jmp short .hlt
+	align 2, db 0xCC
+fat32absend:
 
 str_ioerror	db 'HD Error'
 str_missing	db 'Missing '

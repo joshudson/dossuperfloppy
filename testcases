@@ -1,0 +1,22 @@
+1) Install on HD with FAT16 using MS-DOS 6, ensure it boots
+	dd if=/dev/zero of=hd.img bs=512 count=1 seek=129023
+
+2) Wipe out the first 0xDA bytes and repair; ensure it boots
+	dd if=/dev/zero of=hd.img bs=112 count=1 conv=notrunc
+
+3) Blit BOOT.16 to the first sector and repair; ensure it boots
+	mcopy -i hd.img ::BOOT.16 BOOT.16
+        tr '\0' '\220' < /dev/zero | dd of=BOOT.16 bs=1 count=1 seek=2 conv=notrunc
+	dd if=BOOT.16 of=hd.img bs=512 count=1 conv=notrunc
+
+4) Install on HD with FAT32 using Win95 OSR2, ensure it boots
+	dd if=/dev/zero of=hd.img bs=512 count=1 seek=1290230
+
+5) Wipe out the first 0xDA bytes and repair; ensure it boots
+	dd if=/dev/zero of=hd.img bs=112 count=1 conv=notrunc
+
+6) Blit reserved sector to the first sector and repair; ensure it boots
+	; Find reserved sector looking for HDSFBSIG
+	dd if=hd.img of=BOOT.32 bs=256 count=2 skip=?
+	dd if=hd.img of=BOOT.32 bs=16 count=1 conv=notrunc
+	dd if=BOOT.32 of=hd.img bs=512 count=1 conv=notrunc
