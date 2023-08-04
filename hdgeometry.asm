@@ -15,6 +15,7 @@ _start:
 	mov	ds, ax
 	mov	es, ax
 	mov	di, ax
+	mov	ah, 08h
 	int	13h
 	jc	.no
 	mov	al, cl
@@ -23,17 +24,18 @@ _start:
 	call	numberout
 	mov	si, s_sects
 	call	stringout
-	mov	al, dl
+	mov	al, dh
 	mov	ah, 0
 	inc	ax
 	call	numberout
 	mov	si, s_heads
 	call	stringout
 	mov	ax, cx
-	rol	al, 1
-	rol	al, 1
 	and	al, 0C0h
+	rol	al, 1
+	rol	al, 1
 	xchg	ah, al
+	inc	ax
 	call	numberout
 	mov	si, s_cyls
 	call	stringout
