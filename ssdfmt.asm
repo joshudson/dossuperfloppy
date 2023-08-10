@@ -647,9 +647,11 @@ mkfat1216common:	; Trashes everything
 	xor	cx, cx
 	inc	cx
 	mov	dh, 0
-	mov	ax, 0301h
+	mov	ah, 03h
+	mov	al, [minclustsizem]
 	int	13h
 	jc	short	.error
+	mov	al, 1
 	call	progressal_base
 	mov	[rebootmsg], byte 1
 	call	writebootcheck
@@ -795,9 +797,11 @@ mkfat32:
 	inc	cx
 	mov	dh, 0
 	mov	dl, [disk]
-	mov	ax, 0301h
+	mov	ah, 03h
+	mov	al, [minclustsizem]
 	int	13h
 	jc	short	.error
+	mov	al, 1
 	call	progressal_base
 	mov	[rebootmsg], byte 1
 	call	writebootcheck
@@ -1107,9 +1111,13 @@ gensuperblock16:
 	adc	dx, si
 	add	ax, [bp + 8]
 	adc	dx, si
-	stc
+	cmp	[oslevel], byte '5'
+	jb	.msdos1
+	add	ax, [minclustsizem]
+	jmp	.msdc1
+.msdos1	stc
 	adc	ax, si
-	adc	dx, si
+.msdc1	adc	dx, si
 	mov	[bp - 4], dx	; [BP - 4] - total sectors high
 	mov	[bp - 6], ax	; [BP - 6] - total sectors low
 	pop	dx
@@ -1128,9 +1136,9 @@ gensuperblock16:
 	stosb
 	mov	al, 1		; number of reserved sectors
 	cmp	[oslevel], byte '5'
-	jb	.msdos
+	jb	.msdos2
 	mov	al, [minclustsizem]
-.msdos	stosw
+.msdos2	stosw
 	mov	al, 2		; Number of fats
 	stosb
 	mov	ax, 512		; Number of root dir entries
@@ -1308,8 +1316,8 @@ gensuperblock32:
 	mov	ax, [bp - 6]
 	sbb	ax, 0
 	stosw
-	xchg	ax, si		; First free cluster = 2 + number of clusters in root dir
-	add	ax, 2
+	xchg	ax, si		; Last allocated cluster = 2 + number of clusters in root dir - 1
+	inc	ax
 	stosw
 	xor	ax, ax
 	stosw
@@ -1470,7 +1478,16 @@ patchsuperblockmbr:
 	call	lineartochs
 	mov	[es:1CEh + 5], dh
 	mov	[es:1CEh + 6], cx
-	pop	dx		; DX was pushed mid part end routine above
+	mov	[es:1FDh], byte 0
+	mov	di, 0200h	; Zeros in the rest of the physical sector
+	mov	ax, 200h
+	mul	word [minclustsizem]
+	xor	cx, cx
+	sub	ax, 200h
+	jz	.noxfil
+	xchg	ax, cx
+	rep	stosw
+.noxfil	pop	dx		; DX was pushed mid part end routine above
 	pop	es
 	pop	bp
 	ret

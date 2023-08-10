@@ -19,6 +19,12 @@ FORMATHD.ZIP: LICENSE.TXT README.TXT PATCHDOS.COM FORMATHD.COM
 SSDFMT.COM: ssdfmt.asm
 	nasm -f bin -o SSDFMT.COM ssdfmt.asm
 
+SSDFIXBT.COM: ssdfixbt.asm
+	nasm -f bin -o SSDFIXBT.COM ssdfixbt.asm
+
+hdgeometry: hdgeometry.asm
+	nasm -f bin -o hdgeometry hdgeometry.asm
+
 GEOMETRY.COM: geometry.asm
 	nasm -f bin -o GEOMETRY.COM geometry.asm
 
