@@ -4,6 +4,7 @@
 *.16
 *.32
 *.img
+*.IMG
 *.iso
 *.bak
 *.tmp
@@ -15,4 +16,4 @@ LICENSE.TXT
 README.TXT
 junk
 junk.asm
-
+hdgeometry

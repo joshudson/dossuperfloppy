@@ -3,6 +3,8 @@
 
 BITS 16
 
+CPU 8086
+
 ORG 0x100
 
 ioerror		equ	0x078A
@@ -122,6 +124,7 @@ prephd32:
 
 prephd16:
 	; Should we adjust partition type for < 65536 sectors? Nah. use the lastest format.
+	; I don't have patches for really old DOS anyway.
 	add	si, 2
 .spl	lodsb
 	cmp	al, ' '
@@ -507,9 +510,8 @@ diskparam:
 	cmp	[si], byte 0x1A
 	jb	short	.nc2
 	cmp	[si + 0x18], word 512
-	je	short	.nc2
-	mov	dx, msg_not512
-	jmp	errormsg
+	jne	short	.nsp	; int 13h extensions express bigger sectors
+				; avoid using LBA, force CHS
 .nc2	cmp	[si], byte 0x18
 	jb	short	.nsp
 .big2	cmp	[si + 0x16], ax
@@ -731,7 +733,7 @@ patchfirstsector_b16:
 	; Generate my BPB parameters (for less code size in boot sector)
 	xor	dx, dx
 	mov	ax, [bp + 0x0B]
-	mov	cl, 9				; If somebody's game they can maybe make 1K sectors work
+	mov	cl, 9
 	shr	ax, cl
 	mov	[mybpb_physsectormult], ax
 	; Compute distance to root directory
@@ -1006,8 +1008,7 @@ dumpsi11:
 bootloadsig	db	'HDSFBSIG'	; Saved for reserved sector handling
 persistflags	db	0
 transflags	db	0
-msg_nofat32	db	'FAT32 is not implemented yet', 13, 10, '$'
-msg_usage	db	'FORMATHD.COM, version 2.0 Copyright (C) Joshua Hudson 2021', 13, 10
+msg_usage	db	'FORMATHD.COM, version 2.0.1 Copyright (C) Joshua Hudson 2021,23', 13, 10
 		db	'FORMATHD formats the entire hard disk as a big single partition, also', 13, 10
 		db	'known as a superfloppy format. This operation must run in two phases', 13, 10
 		db	"because DOS can't reread its partition tables. You must know the BIOS", 13, 10
@@ -1029,16 +1030,15 @@ msg_noreserve2	db	'FAT32 recovery but reserved boot sector not found', 13, 10, '
 msg_badmbr	db	'MBR is no good', 13, 10, '$'
 msg_bigbpb	db	'BPB is too large; disk will not boot', 13, 10, '$'
 msg_bootfile	db	'BOOT    16  lost; disk will not boot', 13, 10, '$'
-msg_not512	db	'Hard disk sector size is not 512 bytes', 13, 10, '$'
 msg_rawioerror	db	'HD IO Error', 13, 10, '$'
 formatexe	db	'A:\FORMAT.COM', 0
-formatcmd:	db	' '
+formatcmd	db	' '
 formatcmddrive	db	'C: /S'
 formatcmdend	db	0
 		align 2, db 0
 
 %include "errormsg.asm"
-		align 2, db $
+		align 2, db '$'
 
 ;; DATA: boot module
 ;; Code below here must be relocatable; this is no issue except for the far jump

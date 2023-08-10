@@ -28,7 +28,7 @@ _start:
 .nope	mov	dx, usage
 	jmp	error
 
-	db	0xCC			; Align
+align	2, db 0xCC
 fileattr	dw	0		; Initialized data (cheapeat direct)
 patch		dw	0
 length		dw	0
@@ -297,6 +297,7 @@ checkpointdxdi:
 .s	db	13, 10, 0, 0, 0, 0, 0, 0, 0, 0, '$'
 %endif
 
+align	2, db 0
 patchtable:
 	dw	.notpatched
 	dw	.matched
