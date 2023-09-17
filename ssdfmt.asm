@@ -37,6 +37,7 @@ nextdisk:
 	push	es
 	push	di
 	mov	di, dap	; Allow this region to get trashed
+	stc
 	mov	ah, 08h
 	int	13h
 	pop	di
@@ -161,6 +162,11 @@ nextdisk:
 	
 	; Draw disks
 mainscreen:
+	mov	bl, 8
+	mov	si, s_vsn
+	mov	cx, 4
+	mov	dx, 014Bh
+	call	out_stringat
 	mov	si, disktable
 	xor	dx, dx
 .nextdiskdraw:
@@ -513,7 +519,7 @@ mkfat16	mov	[disklba], byte 0
 mkfat1216commonentry:
 	call	mkfat1216common
 	jc	.error
-	jmp	mainscreenreturn
+	jmp	afterfat
 .error	jmp	diskerror
 
 mkfat12big:
@@ -810,7 +816,7 @@ mkfat32:
 	call	progressal_base
 	push	ds
 	pop	es
-	jmp	mainscreenreturn
+	jmp	afterfat
 
 .error6	sub	sp, 2
 .error5	sub	sp, 8
@@ -1333,9 +1339,78 @@ gensuperblock32:
 	ret
 
 volumeserial:
-	xor	ax, ax		; Dummy volume serial number
+	push	dx
+	stc
+	mov	ah, 4
+	int	1Ah
+	jc	.noday
+.day	mov	al, dl
+	call	unpackbcd
+	mov	[dap], al		;Day
+	mov	al, dh
+	call	unpackbcd
+	mov	[dap + 1], al		;Month
+	mov	al, cl
+	call	unpackbcd
+	mov	ah, 0
+	mov	[dap + 2], ax		;Year (low)
+	mov	ah, ch
+	call	unpackbcd
+	mov	ah, 100
+	mul	ah
+	add	[dap + 2], ax		;Year (includes century)
+	mov	ah, 0
+	int	1Ah
+	xchg	ax, dx
+	mov	dx, cx
+	mov	bl, al
+	mov	bh, al
+	mov	cx, 65520
+	div	cx
+	mov	[dap + 3], al		; Hour
+	xchg	ax, dx
+	xor	dx, dx
+	mov	cx, 1092
+	div	cx
+	mov	[dap + 4], al		; Minute
+	xchg	ax, dx
+	mov	cx, 10
+	mul	cx
+	mov	cx, 182			; Divide by 18.2
+	div	cx
+	mov	[dap + 5], al		; Second
+	xchg	ax, dx
+	mov	cl, 100
+	mul	cl
+	mov	cl, 182
+	div	cl
+	mov	[dap + 6], al		; Hundredths
+	mov	ah, [dap + 1]
+	mov	al, [dap]
+	mov	dh, [dap + 5]
+	mov	dl, [dap + 6]
+	add	ax, dx
 	stosw
+	mov	ah, [dap + 3]
+	mov	al, [dap + 4]
+	mov	dx, [dap + 2]
+	add	ax, dx
 	stosw
+	pop	dx
+	ret
+.noday	xor	cx, cx
+	xor	dx, dx
+	jmp	.day
+
+unpackbcd:
+	push	cx
+	mov	ch, al
+	mov	al, 4
+	shr	al, cl
+	mov	cl, 10
+	mul	cl
+	add	al, ch
+	pop	cx
 	ret
 
 gennobootmsg:
@@ -1462,8 +1537,12 @@ patchsuperblockmbr:
 	; Write MBR pointer to boot check
 	xor	si, si
 	mov	cx, [minclustsizem]
-	mov	[es:1CEh + 4], byte 0B0h
-	mov	[es:1CEh + 8], cx
+	cmp	[disklba], byte 0
+	je	.bcchs
+	mov	[es:1CEh + 4], byte 0B5h
+	jmp	.bccx
+.bcchs	mov	[es:1CEh + 4], byte 0B0h
+.bccx	mov	[es:1CEh + 8], cx
 	mov	[es:1CEh + 10], si
 	call	lineartochs
 	mov	dl, 0
@@ -1893,6 +1972,94 @@ diskerror:
 	mov	cx, 12
 	mov	dx, 1622h
 	call	out_stringat
+	jmp	mainscreenreturn
+
+afterfat:
+	cmp	[disk], byte 80h
+	jbe	.msr
+	mov	es, [blockseg]
+	xor	bx, bx
+	mov	dx, 80h
+	mov	cx, 1
+	mov	ax, 0201h
+	int	13h
+	jc	.msr
+	mov	di, 1BEh
+	mov	cx, 4
+.scan	mov	al, es:[di + 4]
+	cmp	al, byte 0B0h
+	je	.found
+	cmp	al, byte 0B5h
+	je	.found
+	add	di, 16
+	loop	.scan
+.msr	jmp	mainscreenreturnes
+.found	mov	bl, 9
+	mov	ax, 091Ah
+	mov	cx, 041Ah
+	call	draw_box
+	mov	cx, 24
+	mov	dx, 0A1Bh
+	mov	si, s_exd1
+	call	out_stringat
+	mov	cx, 24
+	mov	dx, 0B1Bh
+	mov	si, s_exd2
+	call	out_stringat
+	mov	ah, 0
+	int	16h
+	cmp	al, 'y'
+	je	.y
+	cmp	al, 'Y'
+	jne	.msr
+.y	mov	bx, 0200h
+	mov	ah, 2
+	call	.afdiskio
+	jc	.msr2
+	lea	si, [bx + 10]
+	mov	dl, [disk]
+	mov	dh, [minclustsizem]
+	mov	cx, 16
+.loop2	cmp	es:[si], dl
+	je	.msr2
+	cmp	es:[si], byte 0
+	je	.slot
+	add	si, 2
+	loop	.loop2
+.msr2	jmp	mainscreenreturnes	;Nope! (Emergency safeguard)
+.slot	mov	es:[si], dx
+	mov	es:[si + 2], byte 0
+	mov	ah, 3
+	call	.afdiskio
+	jmp	mainscreenreturnes
+.afdiskio:
+	mov	al, 1
+	cmp	[di + 4], byte 0B5h
+	je	.lba
+	mov	dh, es:[di + 1]
+	mov	cx, es:[di + 2]
+	mov	dl, 80h
+	int	13h
+	ret
+.lba	add	ah, 40h
+	xor	cx, cx
+	mov	si, dap
+	mov	[si], word 10h
+	mov	[si + 2], cx
+	mov	[si + 2], al
+	mov	[si + 4], bx
+	mov	[si + 6], es
+	mov	[si + 12], cx
+	mov	[si + 14], cx
+	mov	cx, [di + 8]
+	mov	[si + 8], cx
+	mov	cx, [di + 10]
+	mov	[si + 10], cx
+	int	13h
+	ret
+mainscreenreturnes:
+	push	ds
+	pop	es
 mainscreenreturn:
 	mov	bx, 7
 	mov	cx, 78
@@ -1930,11 +2097,10 @@ exit:
 	jnz	.dos
 	or	bx, bx
 	jnz	.dos
-.bios:
-	mov	dl, [saveddl]
+.bios	mov	dl, [saveddl]
 	mov	dh, 0
 	mov	cx, 1
-	mov	ax, es
+	mov	es, ax
 	mov	ds, ax
 	mov	bx, 7C00h
 	cli
@@ -1971,6 +2137,8 @@ fat32nm	db	'FAT32   '
 align 4, db 0
 
 procmbreloc:
+	mov	di, di		; Two byte NOP
+				; Hitpoint for mov dl, 80h if required because of buggy BIOS
 	cld
 	cli
 	xor	ax, ax
@@ -1992,8 +2160,6 @@ procmbreloc:
 procmbreloc.end:
 
 procmbr:
-	mov	di, di		; Two byte NOP
-				; Hitpoint for mov dl, 80h if required because of buggy BIOS
 	mov	al, 3
 	mov	si, 07BEh
 .srch1	mov	ah, [si + 4]
@@ -2135,7 +2301,7 @@ bc_uselba	equ	0640h
 	jne	.fixed
 	mov	al, [bc_saveddl]
 .fixed	push	si
-	mov	dx, ax
+	xchg	ax, dx
 	xor	ax, ax
 	mov	[bc_tablow], ax
 	mov	[bc_tabhigh], ax
@@ -2151,6 +2317,7 @@ bc_uselba	equ	0640h
 	push	es
 	mov	es, di
 	mov	ah, 08h
+	stc
 	int	13h
 	pop	es
 	jc	short .e2v
@@ -2330,22 +2497,22 @@ bootcheckdisk:
 	call	.isrep
 	jnz	.loop2e
 	call	.fix
-	or	[bp - 16], byte 1
+	or	[bp - 16], byte 2
 	jmp	.loop2e
 .err2v	jmp	.error2
 .rep1	add	di, 8000h
 	call	.isrep
-	jnz	.bothrep
+	jz	.bothrep
 	xchg	si, di
 	call	.fix
-	or	[bp - 16], byte 2
+	or	[bp - 16], byte 1
 	;jmp	.loop2e
 .bothrep:	; Both rep-digits; what do we do? Defer to the main check tool.
 		; Both 0000 and FFFF are valid and they're the most likely cases.
 		; Also there's no way to end up with two different reps by torn writes
 .loop2e	inc	bh
 	inc	bh
-	loop	.loop2	
+	loop	.loop2
 
 	;Write back any fixes
 	test	[bp - 16], byte 1
@@ -2356,7 +2523,6 @@ bootcheckdisk:
 	mov	ah, 3
 	mov	al, [bp - 15]
 	call	bootcheckdiskop
-	jc	.error2
 .nf1	test	[bp - 16], byte 2
 	jz	.nf2
 	mov	cx, [bp - 22]
@@ -2759,10 +2925,13 @@ bootcheck_end:
 ; Stringtable
 
 s_name	db	0B5h, ' SSD Format ', 0C6h
+s_vsn	db	'v1.0'
 s_disk	db	'format disk '
 s_mb	db	' MB'
 s_data1	db	'Disk X has data'
 s_data2	db	'Press Y to erase'
+s_exd1	db	'     Is fixed disk?     '
+s_exd2	db	'Press Y to check on boot'
 s_esc	db	'ESC) exit'
 s_sect	db	0B5h, ' Sector Size ', 0C6h
 s_stxt1	db	'Must be the physical size'
@@ -2859,7 +3028,7 @@ align	4, db 0
 
 ;END DEBUG
 
-bss		equ	0C000h
+bss		equ	08000h
 numdisks	equ	bss
 disk		equ	bss + 2
 saveddl		equ	bss + 3
@@ -2874,7 +3043,7 @@ bignum		equ	bss + 64	; Size = 8 bytes
 pgbar		equ	bss + 64	; Size = 16 bytes; overlaps bignum
 disklba		equ	bss + 80
 
-disktable	equ	0D000h
+disktable	equ	09000h
 ;[disktable] = bytes per sector
 ;[disktable + 2] = sectors
 ;[disktable + 4] = heads

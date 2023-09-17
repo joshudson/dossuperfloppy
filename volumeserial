@@ -1,0 +1,13 @@
+Generating a volume serial number:
+
+First 16 bit number:
+
+(Month * 256 + Day) + (Second * 256 + Hundredth)
+
+Second 16 bit number:
+
+(Hour * 256 + Minute) + (Year)
+
+INT 1AH function AH=00h returns ticks (18.2 ticks per second) since midnight in CX:DX
+INT 1AH function AH=04h returns CH=BCD century, CL=BCD year, DH=BCD month, DL=BCD day
+With function 04h set cf before entering, verify cf clear or you don't have a calandar
