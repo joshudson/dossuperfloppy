@@ -1,4 +1,4 @@
-;; Copyright (C) Joshua Hudson 2021
+;; Copyright (C) Joshua Hudson 2021, 2023
 ;; Licensed under CC-BY-SA 4.0
 
 BITS 16
@@ -123,8 +123,7 @@ prephd32:
 .nope	jmp	_start.nope
 
 prephd16:
-	; Should we adjust partition type for < 65536 sectors? Nah. use the lastest format.
-	; I don't have patches for really old DOS anyway.
+	; Adjust for would create FAT12 or small FAT16 is inside create MBR below
 	add	si, 2
 .spl	lodsb
 	cmp	al, ' '
@@ -588,7 +587,15 @@ makepartitiontable:
 	xchg	ax, dx
 	stosw
 	xor	ax, ax
-	mov	cx, 24
+	cmp	[di - 16 + 4], byte 0x06
+	jne	.nofx
+	cmp	[di - 2], word 0
+	jne	.nofx
+	mov	[di - 16 + 4], byte 0x04	; Small FAT16
+	cmp	[di - 4], word 0x8000
+	jae	.nofx
+	mov	[di - 16 + 4], byte 0x01	; Will always be FAT12
+.nofx	mov	cx, 24
 	rep	stosw
 	mov	ax, 0xAA55
 	stosw

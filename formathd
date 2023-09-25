@@ -4,7 +4,7 @@ Tools for preparing a hard disk with a superfloppy format for use with DOS
 operating systems.
 
 Requirements:
- * 8086 PC with 128kb RAM
+ * 8086 PC with 192kb RAM (128kb free)
  * MS-DOS 3.31 or newer
  * Hard Disk with 512 bytes per sector
  * BIOS service int 13h ah=08h that works (no EZDrive)
@@ -48,4 +48,4 @@ of data loss.
 
 I have verified these instructions on MS-DOS 6.20 and Windows 95 under QEMU.
 
-Copyright (C) Joshua Hudson 2021, Licensed under CC-BY-SA 4.0
+Copyright (C) Joshua Hudson 2021, 2023 Licensed under CC-BY-SA 4.0

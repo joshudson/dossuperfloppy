@@ -12,7 +12,8 @@
 *.ZIP
 debug.txt
 qemu*.sh
-LICENSE.TXT
+FORMATHD.TXT
+SSDFMT.TXT
 README.TXT
 junk
 junk.asm

@@ -1,10 +1,10 @@
-all: FORMATHD.ZIP
+all: FORMATHD.ZIP SSDFMT.ZIP
 
 LICENSE.TXT: LICENSE
 	todos < LICENSE > LICENSE.TXT
 
-README.TXT: README
-	todos < README > README.TXT
+FORMATHD.TXT: formathd
+	todos < formathd > FORMATHD.TXT
 
 PATCHDOS.COM: patchdos.asm errormsg.asm
 	nasm -f bin -o PATCHDOS.COM patchdos.asm
@@ -12,18 +12,25 @@ PATCHDOS.COM: patchdos.asm errormsg.asm
 FORMATHD.COM: formathd.asm errormsg.asm
 	nasm -f bin -o FORMATHD.COM formathd.asm
 
-FORMATHD.ZIP: LICENSE.TXT README.TXT PATCHDOS.COM FORMATHD.COM
+FORMATHD.ZIP: LICENSE.TXT FORMATHD.TXT PATCHDOS.COM FORMATHD.COM ISSF.COM
 	rm -f FORMATHD.ZIP
-	zip -9 FORMATHD.ZIP README.TXT LICENSE.TXT PATCHDOS.COM FORMATHD.COM
+	zip -9 FORMATHD.ZIP FORMATHD.TXT LICENSE.TXT PATCHDOS.COM FORMATHD.COM ISSF.COM
 
 ISSF.COM: issf.asm
 	nasm -f bin -o ISSF.COM issf.asm
+
+SSDFMT.TXT: ssdfmt
+	todos < ssdfmt > SSDFMT.TXT
 
 SSDFMT.COM: ssdfmt.asm
 	nasm -f bin -o SSDFMT.COM ssdfmt.asm
 
 SSDFIXBT.COM: ssdfixbt.asm
 	nasm -f bin -o SSDFIXBT.COM ssdfixbt.asm
+
+SSDFMT.ZIP: LICENSE.TXT SSDFMT.TXT SSDFMT.COM SSDFIXBT.COM ISSF.COM
+	rm -f SSDFMT.ZMP
+	zip -9 SSDFMT.ZIP SSDFMT.TXT LICENSE.TXT SSDFMT.COM SSDFIXBT.COM ISSF.COM
 
 hdgeometry: hdgeometry.asm
 	nasm -f bin -o hdgeometry hdgeometry.asm
