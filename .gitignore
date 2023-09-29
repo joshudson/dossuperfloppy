@@ -12,9 +12,7 @@
 *.ZIP
 debug.txt
 qemu*.sh
-FORMATHD.TXT
-SSDFMT.TXT
-README.TXT
+*.TXT
 junk
 junk.asm
 hdgeometry
