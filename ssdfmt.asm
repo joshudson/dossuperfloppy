@@ -749,7 +749,6 @@ mkfat32:
 	push	ax
 	mov	cx, bx
 	call	getleadingsectors
-	jc	.error5
 	push	bx
 	xchg	bx, cx
 	add	cx, bx
@@ -1339,6 +1338,7 @@ gensuperblock32:
 	ret
 
 volumeserial:
+	push	bx
 	push	dx
 	stc
 	mov	ah, 4
@@ -1397,6 +1397,7 @@ volumeserial:
 	add	ax, dx
 	stosw
 	pop	dx
+	pop	bx
 	ret
 .noday	xor	cx, cx
 	xor	dx, dx
@@ -1721,7 +1722,7 @@ writeemptyfat32:
 	jnz	.loop
 	or	dx, dx
 	jnz	.loop
-	;CF is guarnateed clear here
+	;CF is guaranateed clear here
 .out2	pop	bp
 	pop	dx
 	ret
