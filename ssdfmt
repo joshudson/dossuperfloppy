@@ -15,13 +15,13 @@ Requrements:
  * Don't use SSDs advertised as optimized for Windows XP
 
 The technology used in SSDFMT is newer than the technology in FORMATHD,
-and as a consequence, patching DOS is no longer required. SSDFMT contains
-an internal quickformat routine that writes the FAT filessytem aligned to
-the physical sectors, while still presenting to DOS the 512 byte logical
-sectors that DOS expects. The boot sequence knows it's running on an
-SSD and not a rotating head disk, and performs a boot time check for
-torn writes to the FAT resulting in erased sectors rather than the read
-errors that DOS expects and fixes these automatically.
+and as a consequence, patching DOS is no longer required. SSDFMT contains an
+internal quickformat routine that writes the FAT filessytem aligned to the
+physical sectors, while still presenting to DOS the 512 byte logical sectors
+that DOS expects. The boot sequence knows it's running on an SSD and not a
+rotating head disk, and performs a boot time check for torn writes to the
+FAT resulting in erased sectors rather than the read errors that DOS expects
+and fixes these automatically.
 
 This project sets up the filesystem from inside operating system rather
 than from any host operating system (and thus should work on bare hardware).
@@ -43,18 +43,30 @@ ALL DATA ON THE TARGET DISK WILL BE ERASED.
 9: Run SSDFIXBT to fix damage to the MBR caused by step 8.
 
 I have verified these instructions on MS-DOS 6.20 and Windows 95 under
-DOSBox-X.
+DOSBox-X, and on MS-DOS 5.0 on QEMU.
 
-Some SSDs with 4096 byte sectors were sold as optimized for Windows XP.
-This was done by leaving a gap between the 63rd and the 64th logical sector
-so that future writes to the NTFS datastructures were aligned with the 4096
+Some SSDs with 4096 byte sectors were sold as optimized for Windows XP. This
+was done by leaving a gap between the 63rd and the 64th logical sector so
+that future writes to the NTFS datastructures were aligned with the 4096
 byte physical sector size. Such SSDs should not be used with SSDFMT as this
 completely defeats the alignment logic and risks arbitrary data corruption
 due to impossible (and therefore unhandled) torn writes.
 
-If you use this tool to write an aligned FAT32 filesystem and install
-Windows XP on it, and later run CONVERT.EXE to convert the filesystem to
-NTFS, get a DOS disk and run FDISK /MBR to destroy the shadow boot sector
-to avoid data loss.
+If you use this tool to write an aligned FAT16 filesystem and install
+Windows NT on it, or a FAT32 filesystem and install Windows XP on it, and
+later run CONVERT.EXE to convert the filesystem to NTFS, run the included
+POSTNTFS.EXE to get rid of the shadow bootsector to avoid data loss.
+
+The hard disk geometry plays havok with QEMU's auto-detect disk geometry. If
+you use this with QEMU, you must specify the geometry manually, which makes
+for a very long command line. Example:
+
+qemu-system-i386 -cpu pentium \
+	-drive if=none,id=mydisk,format=raw,file=hd.img \
+	-device ide-hd,drive=mydisk,cyls=1024,heads=16,sects=63 \
+	-fda freedos-ssd.img \
+	-boot a
+
+This is a good candidate to write down once and put in a startup script.
 
 Copyright (C) Joshua Hudson 2022, 2023 Licensed under CC-BY-SA 4.0

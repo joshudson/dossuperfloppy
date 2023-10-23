@@ -2091,14 +2091,14 @@ exit:
 %endif
 	xor	dx, dx
 	mov	es, dx
-	mov	dl, [saveddl]
 	mov	ax, [es:86h]
 	mov	bx, [es:84h]
 	or	ax, ax
 	jnz	.dos
 	or	bx, bx
 	jnz	.dos
-.bios	mov	dl, [saveddl]
+.bios	xor	ax, ax
+	mov	dl, [saveddl]
 	mov	dh, 0
 	mov	cx, 1
 	mov	es, ax
