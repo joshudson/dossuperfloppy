@@ -470,15 +470,15 @@ havedisk:
 	cmp	al, '6'
 	jne	.nflba
 	jmp	mkfat32.lba
-.nflba	cmp	al, '5'
+.nflba	mov	[disklba], byte 0	; FAT32 can turn it back on, FAT16 can't
+	cmp	al, '5'
 	jne	.nf32
 	jmp	mkfat32
 .nf32	cmp	al, '1'
 	jne	mkfat16
 	jmp	mkfat12
 
-mkfat16	mov	[disklba], byte 0
-	mov	bl, al
+mkfat16	mov	bl, al
 	mov	ax, [di + 2]	; Use CHS size in case whole isn't LBA accessible
 	mul	word [di + 4]
 	mul	word [di + 6]	; Size is in DX:AX
@@ -547,8 +547,6 @@ mkfat12big:
 mkfat12:
 	; If we got here we either have a really small disk or an OS version that crimps us to 64k sectors anyway.
 	; Fine. Make a small disk.
-	; Always use CHS size here in case whole disk isn't accessible by CHS
-	mov	[disklba], byte 0
 	mov	ax, [di + 2]
 	mul	word [di + 4]
 	mul	word [di + 6]
@@ -1828,8 +1826,10 @@ lineardiskop:
 	mov	[si + 10], di
 	mov	[si + 12], bp
 	mov	[si + 14], bp
+	mov	al, 0		; On write, AL = verify flag
 	pop	bp
 	int	13h
+	mov	al, [si + 2]
 	pop	di
 	pop	si
 	ret
@@ -2705,8 +2705,10 @@ bootcheckdiskop:
 	mov	[si + 10], di
 	mov	[si + 12], bp
 	mov	[si + 14], bp
+	mov	al, 0			; AL on write = verify flag
 	pop	bp
 	int	13h
+	mov	al, [si + 2]
 	pop	si
 	ret
 .chs	mov	di, bc_diskstr
