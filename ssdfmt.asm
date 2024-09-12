@@ -1,4 +1,6 @@
-; Copyright Joshua Hudson 2022-23
+; Copyright Joshua Hudson 2022-24
+
+; Next up: test boot check on second partition
 
 BITS 16
 CPU 8086
@@ -416,6 +418,7 @@ havedisk:
 	mov	bl, bh
 	mov	bh, 0
 	mov	[minclustsizem], bx
+	mov	[diskebr], byte 0
 	
 	mov	ax, 0718h
 	mov	cx, 0B1Eh
@@ -476,165 +479,368 @@ havedisk:
 	jmp	mkfat32
 .nf32	cmp	al, '1'
 	jne	mkfat16
-	jmp	mkfat12
+	;jmp	mkfat12
 
+	; If we got here we either have a really small disk or an OS version that crimps us to 64k sectors anyway.
+	; Fine. Make a small disk.
+mkfat12	mov	bp, 0A000h
+	mov	ax, [di + 2]
+	mul	word [di + 4]
+	mul	word [di + 6]
+	mov	bx, [di + 2]
+	mov	cx, [di + 4]
+	mov	si, [di + 6]
+	or	dx, dx		; MS-DOS before 3.31 can't access disk sectors past 32 MB due to 16 bit math in disk geometry
+	jz	.n64k
+	xor	ax, ax
+	mov	dx, 1
+	jmp	mksmallcommon
+.n64k	cmp	ah, 0
+	jne	mksmallcommon
+	mov	bx, 7		; Below 256 sectors isn't worth bothering with
+	mov	si, s_small	; Below 224 sectors we would miscalculate on some inputs
+	mov	cx, 17		; The difference isn't worth handling; below 1MB SSD is nuts
+	mov	dx, 161Fh
+	call	out_stringat
+	jmp	mainscreenreturn
+mksmallcommon:
+	xor	bx, bx
+	mov	[diskebroffset], bx
+	mov	[diskebroffset + 2], bx
+	mov	[diskebr], byte 2
+	mov	[usabledisksize], ax
+	mov	[usabledisksize + 2], dx
+	call	getleadingsectors
+	mov	ds:[bp + 8], bx
+	mov	ds:[bp + 10], cx
+	call	calcsizes12
+	jmp	mkall
+
+	; Got here trying to make a FAT16; that is, anything below DOS 7.1
 mkfat16	mov	bl, al
 	mov	ax, [di + 2]	; Use CHS size in case whole isn't LBA accessible
 	mul	word [di + 4]
 	mul	word [di + 6]	; Size is in DX:AX
-	cmp	al, '4'
-	jae	.n512m
-	;According to some documentation, DOS 3.31 can't handle disk sizes > 512MB so we truncate.
-	cmp	dx, 10h
+	or	dx, dx
+	jnz	.i64k
+	cmp	ah, 0
+	je	mkfat12		; Protect builder algorithm against ridiculously small inputs
+.i64k	cmp	bl, '4'
+	jae	.oksiz
+	cmp	dx, 10h		;According to some documentation, DOS 3.31 can't handle disk sizes > 512MB so we truncate.
 	jbe	.n512m
 	xor	ax, ax
 	mov	dx, 10h
-.n512m	cmp	al, '2'
-	jne	.n64k
-	;Set limiter; max offset is 64k sectors
-	;This is a whole-disk limit as the DOS versions here do 16 bit math to get the geometry from sector size
-	or	dx, dx
-	jz	.n64k
+.n512m	cmp	bl, '2'
+	jne	.oksiz
+	or	dx, dx		; MS-DOS before 3.31 can't access disk sectors past 32 MB due to 16 bit math in disk geometry
+	jz	.oksiz
 	xor	ax, ax
 	mov	dx, 1
-.n64k	test	ah, 80h
-	jne	.n32k
-	jmp	mkfat12		; According to the documentation, this must be a FAT12 or some DOS is unhappy
-.n32k	call	getleadingsectors
-	; Calculate how much space is gobbled up by the FS headers
-	sub	ax, bx
-	sbb	dx, 0
+	mov	ax, 0FFFFh
+.oksiz	mov	bp, 0A000h
+	mov	[diskebr], byte 0
+	cmp	bl, '2'		; MS-DOS this old doesn't know about EBR
+	jbe	mksmallcommon
+.next	call	calcebralign
+	call	calcsizes16
+	or	[diskebr], byte 1
+	test	[diskebr], byte 2
+	jz	.next
+	jmp	mkall
+
+; New mkfat32 will live here
+
+mkall:
+	mov	ax, [minclustsizem]
+	xor	dx, dx
+	mov	si, 0A000h
+.scan	add	ax, [si + 16]
+	adc	dx, [si + 18]
+	add	ax, [si + 16]
+	adc	dx, [si + 18]
+	add	ax, [si + 6]
+	adc	dx, 0
+	add	si, 32
+	cmp	[si], byte 0
+	jne	.scan
+	mov	bp, si
+	mov	cx, 01701h
+	mov	bx, 04F07h
+	mov	si, pgbar
+	call	initprogressbar
+	mov	[diskebr], byte 3
+.go	call	applyentry
+	jc	.error
+	and	[diskebr], byte 0FDh
+	cmp	bp, 0A000h
+	jne	.go
+	jmp	afterfat
+.error	jmp	diskerror
+
+;Calculate offset to next EBR entry
+;On the *first call*, DX:AX is the size of the disk in 512 byte sectors
+calcebralign:
+	cmp	[oslevel], byte '5'
+	jae	.calcebralign32
+	test	[diskebr], byte 1
+	jz	.isprimary
+	mov	bx, [diskpriorebr]
+	mov	cx, [diskpriorebr + 2]
+	mov	[diskebroffset], bx
+	mov	[diskebroffset + 2], cx
+	add	bx, [minclustsizem]
+	adc	cx, 0
+	jmp	.calcmaxfat16
+.isprimary:
+	xor	bx, bx
+	mov	[diskebroffset], bx
+	mov	[diskebroffset + 2], bx
+	mov	[usabledisksize], ax
+	mov	[usabledisksize + 2], dx
+	mov	[usabledisksize2], ax
+	mov	[usabledisksize2 + 2], dx
+	call	getleadingsectors
+.calcmaxfat16:
+	add	bx, 80h	; FFF6h * 20h + 100h * 2h (see 40h as loop terminator in fatsize)
+	add	cx, 20h
+	push	bx
+	push	cx
+	sub	bx, [usabledisksize2]
+	sbb	cx, [usabledisksize2 + 2]
+	jnc	.whole				; Doesn't fit: must be last
+	not	cx
+	neg	bx
+	adc	cx, 0
+	jnz	.ebr
+	cmp	bx, 2048
+	jb	.whole		; That partition is too small to bother with
+.ebr	pop	cx
+	pop	bx
+	; We have the stopping point in CX:BX; compute alignment
+	call	cylinderaligncxbx
+	mov	[diskpriorebr], bx
+	mov	[diskpriorebr + 2], cx
+	sub	[usabledisksize2], bx
+	sbb	[usabledisksize2 + 2], cx
+	sub	bx, [diskebroffset]		; DOES THIS MAKE SENSE ??
+	sbb	cx, [diskebroffset + 2]
+	mov	[usabledisksize], bx
+	mov	[usabledisksize + 2], cx
+	jmp	.finish
+	ret
+.whole	pop	cx
+	pop	bx
+	or	[diskebr], byte 2
+.finish	call	getleadingsectors
+	mov	ds:[bp + 8], bx
+	mov	ds:[bp + 10], cx
+	ret
+.calcebralign32:			; Just use whole disk (TODO: memory constraint)
+	jmp	.whole
+
+cylinderaligncxbx:
+	mov	ax, [di + 4]
+	mul	word [di + 2]	; Align to this many sectors
+	mov	si, ax		; EBR must start at the the start of a cylinder
+	xor	dx, dx
+	mov	ax, cx
+	div	si
+	mov	ax, bx
+	div	si
+	sub	bx, dx		; Subtract off the partial cylinder
+	sbb	cx, 0
+.scan	xor	dx, dx		; Now scan backwards for an aligned cylinder
+	mov	ax, cx
+	div	word [minclustsizem]
+	mov	ax, bx
+	div	word [minclustsizem]
+	or	dx, dx
+	jz	.found
+	sub	bx, si
+	sbb	cx, 0
+	jmp	.scan
+.found	ret
+
+; Calculate size of FAT partition, this entry point means FAT32 is permissible
+; Input: BP = output area; DI = disktable
+calcsizes32:
+	call	calcsizesprep
+	jz	calcsizes16	; Clearly impossible to fit a FAT32 here; this protects the calc routine from underflow
 	mov	bx, [minclustsizem]
+	call	fatsize32
+	or	si, si
+	jnz	.ok32
+	cmp	cx, 0FFF6h
+	jbe	calcsizes16	; Doesn't fit
+.ok32	mov	ds:[bp], byte 32
+	push	bx		; Yup calcsizesstuff takes an argument on the stack
+	push	ax
+	mov	ax, bx		; Reserved sectors = 3 clusters
+	add	bx, ax		; Could change this to 3 physical sectors (2kb minimum)
+	add	bx, ax
+	pop	ax
+	jmp	calcsizesstuff
+calcsizes16:			; FAT32 not permissible, FAT16 is
+	call	calcsizesprep
+	call	reservedsectorsadj
+	or	dx, dx
+	jz	.ok16p
+	test	ah, 80h		; According to the documentation this must be a FAT12 or some DOS is unhappy
+	jz	calcsizes12
+.ok16p	mov	bx, [minclustsizem]
 	mov	cx, 0FFF4h		; Maximum number of clusters is FFF4
 	mov	si, 100h
 	call	fatsize
 	cmp	ax, 0FF5h
-	jb	short	mkfat12big	; MS operating systems uses a < here; FF6 cannot occur
-.is16	mov	bp, 4		; Get partition type
-	call	isbigfat
-	mov	dx, bp
-	mov	bp, 0FFFFh
-	mov	si, 0FFF8h
-
-mkfat1216commonentry:
-	call	mkfat1216common
-	jc	.error
-	jmp	afterfat
-.error	jmp	diskerror
-
-mkfat12big:
-	; If we got here we want to make a FAT16 but we can't because the number of clusters is too small
-	mov	ax, [di + 2]
-	mul	word [di + 4]
-	mul	word [di + 6]
-	call	getleadingsectors
-	sub	ax, bx
-	sbb	dx, 0
-
-	; Get sizes of everything
-	mov	bx, [minclustsizem]
-	mov	cx, 0FF4h	; maximum number of clusters is FF4
-	mov	si, 155h
-	call	fatsize
-	mov	bp, 1
-	call	isbigfat
-	mov	dx, bp
-	mov	dh, 1
-	mov	bp, 0FFh
-	mov	si, 0FFF8h
-	jmp	short mkfat1216commonentry
-
-mkfat12:
-	; If we got here we either have a really small disk or an OS version that crimps us to 64k sectors anyway.
-	; Fine. Make a small disk.
-	mov	ax, [di + 2]
-	mul	word [di + 4]
-	mul	word [di + 6]
-	or	dx, dx
-	jz	.n64k
-	xor	ax, ax		; Clamp to 64k (overflow below)
-	xor	dx, dx
-.n64k	call	getleadingsectors
-	sub	ax, bx
-
-	; Get sizes of everything
+	jb	calcsizes12	; MS operating systems uses a < here; FF5 cannot occur
+	mov	ds:[bp], byte 16
+	jmp	calcsizesstuffnot32
+calcsizes12:			; FAT16 not permissible either; codebase assumes there's no way FAT12 can't be made.
+	call	calcsizesprep
+	call	reservedsectorsadj
 	mov	bx, [minclustsizem]
 	mov	cx, 0FF4h	; Maximum number of clusters is FF4
 	mov	si, 155h
 	call	fatsize
-	mov	dx, 0101h
-	mov	bp, 0FFh
-	mov	si, 0FFF8h
-	jmp	short	mkfat1216commonentry
-
-; Sets MBR partition type to 6 if needed
-; Input: AX = clusters, BX = sectors per fat, CX = sectors per cluster, BP = partition type 1 or 4
-; Output = BP changed to 6 if needed ; trashes DX
-isbigfat:
-	push	ax
+	mov	ds:[bp], word 010Ch
+calcsizesstuffnot32:
+	xchg	ax, cx
+	xchg	ax, bx
+	xor	dx, dx
+	xor	si, si
 	push	bx
-	push	cx
-	mul	cx
-	mov	cx, bx
-	call	getleadingsectors
-	add	bx, 33
-	add	bx, cx
-	add	bx, cx
-	add	ax, bx
-	adc	dx, 0
-	jz	.notbig
-	mov	bp, 6
-.notbig	pop	cx
+	mov	bx, 1
+	cmp	[oslevel], byte '5'
+	jb	calcsizesstuff
+	mov	bx, [minclustsizem]
+calcsizesstuff:
+	xchg	di, bp
+	mov	[di + 2], bx
+	add	bx, 32		; Number of sectors for root directory
+	mov	[di + 6], bx
 	pop	bx
-	pop	ax
+	mov	[di + 4], bx	; logical sectors per cluster
+	mov	[di + 20], cx	; number of clusters
+	mov	[di + 22], si
+	mov	[di + 16], ax
+	mov	[di + 18], dx
+	sub	cx, 2		; Number of clusters in DX:AX goes to number of sectors in AX:CX
+	sbb	si, 0
+	mov	ax, cx
+	mul	bx
+	mov	cx, ax
+	xchg	ax, dx
+	mul	bx
+	add	ax, dx
+	add	cx, [di + 20]
+	adc	ax, [di + 22]
+	add	cx, [di + 20]
+	adc	ax, [di + 22]
+	mov	[di + 12], cx
+	mov	[di + 14], ax
+	mov	bx, [diskebroffset]
+	mov	cx, [diskebroffset + 2]
+	mov	[di + 24], bx
+	mov	[di + 26], cx
+	cmp	[di], byte 32	; Get partition type code
+	jne	.f1216
+	test	[disklba], byte 1
+	jne	.chs32
+	mov	[di + 1], byte 0Ch
+	jmp	.final
+.chs32	mov	[di + 1], byte 0Bh
+	jmp	.final
+.f1216	test	[disklba], byte 1
+	jz	.chs
+	mov	[di + 1], byte 0Eh
+	jmp	.final
+.chs	mov	ax, [di + 14]	; Big fat is defiend as FAT that doesn't fit within the first 32MB of disk
+	or	ax, ax
+	jnz	.big
+	mov	ax, [di + 12]
+	add	ax, [di + 8]
+	jc	.big
+	cmp	[di], byte 12
+	jne	.f16s
+	mov	[di + 1], byte 1
+	jmp	.final
+.f16s	mov	[di + 1], byte 4
+.big	mov	[di + 1], byte 6
+.final	add	di, 32
+	mov	[di], byte 0
+	xchg	di, bp
+	ret
+calcsizesprep:
+	mov	ax, [usabledisksize]
+	mov	dx, [usabledisksize + 2]
+	call	getleadingsectors
+	mov	ds:[bp + 12], ax
+	mov	ds:[bp + 14], dx
+	sub	ax, bx
+	sbb	dx, cx
+	ret
+reservedsectorsadj:
+	mov	bx, 1
+	cmp	[oslevel], byte '5'
+	jb	.one
+	mov	bl, [minclustsizem]
+.one	add	ax, bx
+	adc	dx, 0
 	ret
 
-mkfat1216common:	; Trashes everything
-	push	dx	; 1 byte: partition type; 1 byte is FAT12
-	push	si	; bytes 0 and 1 of initial fat
-	push	bp	; bytes 2 and 3 of initial fat
-	push	ax	; Number of clusters
-	push	bx	; Number of sectors per FAT
-	push	cx	; Number of sectors per cluster
-	mov	bp, sp
-
-	mov	si, pgbar
-	mov	ax, bx
-	add	ax, bx
-	add	ax, 2 + 32 + 4
-	cmp	[oslevel], byte '5'
-	jb	.psmall
-	dec	ax
-	add	ax, [minclustsizem]
-.psmall	xor	dx, dx
-	mov	cx, 01701h
-	mov	bx, 04F07h
-	call	initprogressbar
-	
-	call	getleadingsectors
-	xor	si, si
-	mov	cx, bx
-	cmp	[oslevel], byte '5'
-	jb	.osmall
-	add	cx, [minclustsizem]	; FAT32 capable uses FAT32 starting alignment
-	dec	cx
-.osmall	inc	cx
-	mov	bx, [bp + 2]
-	mov	dx, [bp + 6]
-	mov	ax, [bp + 8]
-	call	writeemptyfat
+applyentry:
 	push	es
 	mov	es, [blockseg]
-	jc	short	.error
-
+	sub	bp, 32
+	cmp	bp, 0A000h
+	jne	.ebr
+	and	[diskebr], byte 0FEh
+.ebr	mov	si, bp
+	mov	ax, [si + 24]
+	mov	dx, [si + 26]
+	mov	[diskebroffset], ax
+	mov	[diskebroffset + 2], dx
+	mov	al, [si]
+	cmp	al, 12
+	je	.mkfat12fs
+	cmp	al, 16
+	je	.mkfat16fs
+	cmp	al, 32
+	je	.mkfat32fs
+	mov	ah, 7Fh
+	stc
+.error	pop	es
+	ret
+.mkfat12fs:
+	mov	dx, 0FFh
+	jmp	.mkfat1216common
+.mkfat16fs:
+	mov	dx, 0FFFFh
+.mkfat1216common:
+	mov	ax, 0FFF8h
+	mov	bx, [si + 16]
+	mov	cx, [si + 8]
+	mov	si, [si + 10]
+	add	cx, ds:[bp + 2]
+	adc	si, 0
+	call	writeemptyfat
+	jc	.error
+	mov	si, bp
+	push	word [si + 10]
+	push	word [si + 8]
+	push	word [si + 20]
+	push	word [si + 16]
+	push	word [si + 4]
+	push	word [si + 2]
 	call	gensuperblock16
-	cmp	[bp + 11], byte 1
+	mov	si, bp
+	cmp	[si], byte 12
 	jne	.nf2l
 	mov	[es:3Ah], byte '2'
-.nf2l	add	sp, 6
-	call	getleadingsectors
-	xor	si, si
-	mov	cx, bx
+.nf2l	xor	bx, bx
+	mov	cx, [si + 8]
+	mov	si, [si + 10]
 	mov	ax, 0301h
 	cmp	[oslevel], byte '5'
 	jb	.osm2
@@ -642,33 +848,43 @@ mkfat1216common:	; Trashes everything
 .osm2	xor	bx, bx
 	mov	dl, [disk]
 	call	lineardiskop
-	jc	short	.error
-
+	jc	.error
 	call	progressal_base
-	mov	bl, [bp + 10]
+	mov	ax, [minclustsizem]	; Zero rest of physical cluster if FAT superblock
+	dec	ax			; is located at the end of the physical cluster
+	jz	.nbfill
+	and	ax, cx
+	jz	.nbfill
+	sub	cx, ax
+	sbb	si, 0
+	mov	bx, 204h
+	mov	ah, 3
+	call	lineardiskop
+.nbfill	mov	bl, [ds:bp + 1]
 	call	patchsuperblockmbr
-	xor	bx, bx
-	xor	cx, cx
-	inc	cx
-	mov	dh, 0
-	mov	ah, 03h
+	mov	cx, [ds:bp + 24]
+	mov	si, [ds:bp + 26]
 	mov	al, [minclustsizem]
-	int	13h
-	jc	short	.error
-	mov	al, 1
+	test	[diskebr], byte 1
+	jz	.mbr
+	mov	al, [ds:bp + 8]			; It's a 32 bit subtract but we *know* the difference is between 1 and 16
+	sub	al, [ds:bp + 24]		; No point computing the rest at all
+	jnz	.mbr				; There's a distance
+	inc	al				; EBR directly overlaps boot sector; should not normally happen
+.mbr	mov	ah, 3
+	xor	bx, bx
+	call	lineardiskop
+	jc	.error
 	call	progressal_base
 	mov	[rebootmsg], byte 1
+	test	[diskebr], byte 1		; CF = 0
+	jnz	.ebrnc
 	call	writebootcheck
-	jc	short	.error
-	pop	es
-	mov	al, 4
-	call	progressal_base
-	add	sp, 6	; implicit CLC
+.ebrnc	pop	es
 	ret
-.error	pop	es
-	add	sp, 6
-	stc
-	ret
+.mkfat32fs:
+	ret					; $$$ TODO $$$$
+
 
 mkfat32:
 	cmp	[di], word 512
@@ -707,7 +923,7 @@ mkfat32:
 	mov	dx, ax
 .hsz	call	getleadingsectors
 	sub	ax, bx
-	sbb	dx, 0
+	sbb	dx, cx
 	mov	bx, [minclustsizem]
 	call	fatsize32
 	or	si, si
@@ -745,14 +961,15 @@ mkfat32:
 	push	bx
 	push	dx
 	push	ax
-	mov	cx, bx
+	mov	cx, bx	; Reserve slots for backup boot sectors and fs info sector
+	add	cx, bx
+	add	cx, bx
 	call	getleadingsectors
 	push	bx
+	mov	si, cx
 	xchg	bx, cx
 	add	cx, bx
-	add	cx, bx
-	add	cx, bx
-	xor	si, si
+	adc	si, 0
 	call	writeemptyfat32
 	jc	.error6
 	pop	bp
@@ -1094,19 +1311,19 @@ fatsizexcomp:
 ; Arguments on stack
 ;	es:[0] - output location
 ;	[sp] = ret
-;	[sp + 2] = ignored
+;	[sp + 2] = [bp + 4] - number of reserved sectors
 ;	[sp + 4] = [bp + 6] - number of sectors per cluster
 ;	[sp + 6] = [bp + 8] - number of sectors per fat
 ;	[sp + 8] = [bp + 10] - number of clusters
-;	Caller cleans up the stack
-;	Preserves DX, DI, BP
+;	[sp + 10] = [bp + 12] - number of sectors before start of fs (hidden sectors)
+;	Cleans up the stack itself
+;	Preserves DI, BP
 gensuperblock16:
 	push	bp
 	mov	bp, sp
 	push	di
 	sub	sp, 4
 
-	push	dx
 	xor	si, si
 	mov	ax, [bp + 6]
 	mul	word [bp + 10]
@@ -1114,16 +1331,10 @@ gensuperblock16:
 	adc	dx, si
 	add	ax, [bp + 8]
 	adc	dx, si
-	cmp	[oslevel], byte '5'
-	jb	.msdos1
-	add	ax, [minclustsizem]
-	jmp	.msdc1
-.msdos1	stc
-	adc	ax, si
-.msdc1	adc	dx, si
+	add	ax, [bp + 4]
+	adc	dx, si
 	mov	[bp - 4], dx	; [BP - 4] - total sectors high
 	mov	[bp - 6], ax	; [BP - 6] - total sectors low
-	pop	dx
 	
 	xor	di, di
 	mov	ax, 03CEBh	; JMP to 0x3E
@@ -1137,11 +1348,8 @@ gensuperblock16:
 	stosw
 	mov	ax, [bp + 6]	; Sectors per cluster
 	stosb
-	mov	al, 1		; number of reserved sectors
-	cmp	[oslevel], byte '5'
-	jb	.msdos2
-	mov	al, [minclustsizem]
-.msdos2	stosw
+	mov	ax, [bp + 4]	; number of reserved sectors
+	stosw
 	mov	al, 2		; Number of fats
 	stosb
 	mov	ax, 512		; Number of root dir entries
@@ -1161,10 +1369,9 @@ gensuperblock16:
 	stosw
 	mov	ax, [si + 4]	; Number of heads
 	stosw
-	call	getleadingsectors
-	mov	ax, bx
+	mov	ax, [bp + 12]	; Number of sectors before start of partition
 	stosw
-	xor	ax, ax
+	mov	ax, [bp + 14]
 	stosw
 	mov	ax, [bp - 6]	; Total number of sectors (four byte version)
 	stosw
@@ -1190,7 +1397,7 @@ gensuperblock16:
 	add	sp, 4
 	pop	di
 	pop	bp
-	ret
+	ret	12
 
 ;DX:AX = number of sectors in FAT
 ;SI:CX = number of clusters
@@ -1240,7 +1447,7 @@ gensuperblock32:
 	mov	ax, bx
 	pop	bx
 	stosw
-	xor	ax, ax
+	xchg	ax, cx
 	stosw
 	mov	ax, [bp - 8]	; Number of sectors in filesystem
 	mul	bx
@@ -1281,7 +1488,9 @@ gensuperblock32:
 	stosw
 	mov	al, 29h		; Volume serial and label slot valid
 	stosb
+	push	bx		; Preserve sectors per cluster across this call
 	call	volumeserial
+	pop	bx
 	mov	si, vollbl	; Volume label slot
 	mov	cx, 11
 	rep	movsb
@@ -1335,9 +1544,9 @@ gensuperblock32:
 	pop	di
 	ret
 
+; Generates volume serial number and writes it to ES:DI
+; Trashes AX, BX, CX, DX
 volumeserial:
-	push	bx
-	push	dx
 	stc
 	mov	ah, 4
 	int	1Ah
@@ -1394,8 +1603,6 @@ volumeserial:
 	mov	dx, [dap + 2]
 	add	ax, dx
 	stosw
-	pop	dx
-	pop	bx
 	ret
 .noday	xor	cx, cx
 	xor	dx, dx
@@ -1416,9 +1623,12 @@ gennobootmsg:
 	mov	si, nobootmsg	; Not bootable msg
 	mov	cx, (nobootmsg.end - nobootmsg) / 2
 	rep	movsw
-	mov	di, 1BEh
+	mov	di, 190h
 	mov	si, s_sysc
-	mov	cx, 24
+	test	[diskebr], byte 1
+	jz	.ntebr
+	mov	si, s_nbebr
+.ntebr	mov	cx, 21
 	rep	movsw
 
 	mov	di, 1FDh	; Old disk identity
@@ -1430,20 +1640,16 @@ gennobootmsg:
 
 ;Convert superblock to MBR; works with 12/16/32
 ;BL = parititon type
-;Preserves BP, DI, DL
+;Preserves BP, DI, DX
 patchsuperblockmbr:
-	;If LBA is forced, the wrong partition type is passed: correct
-	cmp	[disklba], byte 0
-	je	.noflba
-	cmp	bl, 0Bh
-	je	.f32lba
-	mov	bl, 0Eh
-	jmp	.noflba
-.f32lba	mov	bl, 0Ch
-.noflba	push	bp
+	push	bp
 	push	es
-	push	di
+	push	dx
 	mov	es, [blockseg]
+	test	[diskebr], byte 1
+	jz	.pri
+	jmp	.ebr
+.pri	push	di
 	xor	cx, cx
 	mov	ax, [es:1Ch]
 	mov	bp, ax
@@ -1495,40 +1701,18 @@ patchsuperblockmbr:
 	mov	[es:1BEh + 1], dh
 	mov	[es:1BEh + 2], cx
 	mov	[es:1BEh + 4], bl
-	mov	[es:1BEh + 8], bp
+	mov	[es:1BEh + 8], bp	; First linear sector of partition
 	mov	ax, [es:20h]
-	dec	bp		; Get LBA address of last sector
+	mov	dx, [es:22h]
+	mov	[es:1BEh + 12], ax	; Number of sectors in partition
+	mov	[es:1BEh + 14], dx
+	dec	bp			; Get linear address of last sector
+	add	ax, bp
+	adc	dx, 0
 	sub	ax, bp
-	mov	[es:1BEh + 12], ax
-	mov	ax, [es:22h]
-	sbb	ax, 0
-	mov	[es:1BEh + 14], ax
-	push	dx		; Now compute CHS address of last sector
-	xor	dx, dx		; unique routine used only here in case of overflow
-	mov	ax, [es:1BEh + 14]
-	div	word [di + 2]
-	mov	bx, ax
-	mov	ax, [es:1BEh + 12]
-	div	word [di + 2]
-	inc	dl
-	mov	[es:1BEh + 6], dl
-	mov	dx, bx
-	cmp	dx, [di + 4]
-	jae	.overflow
-	div	word [di + 4]
-	mov	[es:1BEh + 5], dl
-	cmp	ax, 1024
-	jae	.overflow
-	mov	[es:1BEh + 7], al
-	ror	ah, 1
-	ror	ah, 1
-	or	[es:1BEh + 6], ah
-	jmp	.donechsend
-.overflow:
-	mov	cx, 0FFFFh
-	mov	[es:1BEh + 5], cl
+	call	lineartochsoroverflow	; Get CHS address of last sector
+	mov	[es:1BEh + 5], dh
 	mov	[es:1BEh + 6], cx
-.donechsend:
 	xor	cx, cx		; We wrote last sector above
 	stc			; but we want number of sectors
 	adc	[es:1BEh + 12], cx
@@ -1557,17 +1741,132 @@ patchsuperblockmbr:
 	mov	[es:1CEh + 5], dh
 	mov	[es:1CEh + 6], cx
 	mov	[es:1FDh], byte 0
-	mov	di, 0200h	; Zeros in the rest of the physical sector
-	mov	ax, 200h
-	mul	word [minclustsizem]
-	xor	cx, cx
-	sub	ax, 200h
-	jz	.noxfil
-	xchg	ax, cx
+	jmp	.final
+
+.ebr	mov	ax, [es:1Ch]	; Save distance to partition start
+	mov	dx, [es:1Eh]
+	push	ax
+	push	dx
+	mov	cx, [es:20h]	; Save length of partition in sectors
+	push	cx
+	mov	cx, [es:22h]
+	push	cx
+	cmp	ax, [diskebroffset]
+	jne	.ebrb
+	cmp	dx, [diskebroffset]
+	jne	.ebrb
+	jmp	.ebrgen
+.ebrb	push	di
+	push	ax
+	xor	di, di
+	mov	cx, 512
+	xor	ax, ax
 	rep	stosw
-.noxfil	pop	dx		; DX was pushed mid part end routine above
+	xor	di, di
+	call	gennobootmsg
+	pop	ax
+.ebrgen pop	di			; Get disk table back
+	mov	[es:1FDh], byte 0
+	mov	[es:1BEh + 4], bl
+	pop	dx
+	pop	ax
+	mov	[es:1BEh + 12], ax
+	mov	[es:1BEh + 14], dx
+	pop	dx
+	pop	ax
+	sub	ax, [diskebroffset]
+	sbb	dx, [diskebroffset + 2]
+	mov	[es:1BEh + 8], ax
+	mov	[es:1BEh + 10], dx
+	call	lineartochsoroverflow
+	mov	[es:1BEh + 1], dh
+	mov	[es:1BEh + 2], cx
+	mov	ax, [es:1BEh + 8]
+	mov	dx, [es:1BEh + 10]
+	add	ax, [es:1BEh + 12]
+	adc	dx, [es:1BEh + 14]
+	add	ax, 1
+	adc	dx, 0
+	call	lineartochsoroverflow
+	mov	[es:1BEh + 5], dh
+	mov	[es:1BEh + 6], cx
+.final	test	[diskebr], byte 2
+	jnz	.nxnebr
+	mov	ax, [diskpriorebr]	; We iterate backwards so this is the *next* entry
+	mov	dx, [diskpriorebr + 2]
+	sub	ax, [diskebroffset]
+	sbb	dx, [diskebroffset + 2]
+	mov	[es:1EEh + 8], ax
+	mov	[es:1EEh + 10], dx
+	call	lineartochsoroverflow
+	mov	[es:1EEh + 1], dh
+	mov	[es:1EEh + 2], cx
+	mov	ax, [di + 8]
+	mov	dx, [di + 10]
+	mov	cx, [di + 12]
+	or	cx, [di + 14]
+	jz	.ismbrsized
+	mov	ax, 0FFFFh
+	mov	dx, 0FFFFh
+.ismbrsized:
+	sub	ax, [diskebroffset]
+	sbb	dx, [diskebroffset + 2]
+	push	ax
+	push	dx
+	call	lineartochsoroverflow
+	mov	dl, 05h
+	test	[disklba], byte 1
+	jz	.ebrchs
+	mov	dl, 0Fh
+.ebrchs	mov	[es:1EEh + 4], dx
+	mov	[es:1EEh + 6], cx
+	pop	dx
+	pop	ax
+	sub	ax, [diskpriorebr]
+	sbb	dx, [diskpriorebr + 2]
+	mov	[es:1EEh + 12], ax
+	mov	[es:1EEh + 14], dx
+
+.nxnebr	mov	cx, [minclustsize]
+	sub	cx, 200h
+	jz	.noxfil
+	push	di
+	xor	ax, ax
+	mov	di, 0200h	; Zeros in the rest of the physical sector
+	rep	stosw
+	pop	di
+.noxfil	pop	dx
 	pop	es
 	pop	bp
+	ret
+
+	; DX:AX = linear address; DI = disk table entry
+	; Outputs CX, DH = CHS address, preserves BX, SI, DI, BP
+	; Special routine for computing MBR offsets because these are CHS when possible, linear when not
+lineartochsoroverflow:
+	push	ax
+	xchg	ax, dx
+	xor	dx, dx
+	div	word [di + 2]
+	xchg	ax, cx
+	pop	ax
+	div	word [di + 2]
+	xchg	cx, dx
+	inc	cl		; Sectors
+	cmp	dx, [di + 4]
+	jae	.overflow
+	div	word [di + 4]
+	cmp	ax, 1023
+	ja	.overflow
+	mov	dh, dl
+	xchg	ah, al
+	ror	al, 1
+	ror	al, 1
+	or	cx, ax
+	ret
+.overflow:
+	mov	cx, 0FFFFh
+	mov	dh, 0FFh
 	ret
 
 ;Arguments: DX:AX bottom of FAT marker
@@ -1602,17 +1901,10 @@ writeemptyfat:
 	;We now have a pointer to root directory in SI:CX
 	;clear it too
 	mov	bx, 512
-	mov	bp, 32
-.clrr	mov	ah, 3
-	mov	al, [minclustsizem]
+.clrr	mov	ax, 0320h
 	call	lineardiskop
 	jc	.oops
-	mov	ah, 0
-	add	cx, ax
-	adc	si, 0
 	call	progressal_base
-	sub	bp, ax
-	ja	.clrr
 .oops	pop	bp
 	pop	es
 	ret
@@ -1758,6 +2050,9 @@ writebootcheck:
 	ret
 
 getleadingsectors:
+	test	[diskebr], byte 1
+	jnz	.ebr
+.first	xor	cx, cx
 	mov	bx, [minclustsize]
 	cmp	bx, 1024
 	jbe	.six
@@ -1772,6 +2067,9 @@ getleadingsectors:
 	add	bx, [minclustsizem]
 	dec	bx
 .ret	ret
+.ebr	mov	bx, [diskebroffset]	; Starting from EBR
+	mov	cx, [diskebroffset + 2]
+	jmp	.off
 
 ;Check if disk referenced by DL has LBA support
 ;Clobbers SI, AX
@@ -2076,7 +2374,7 @@ mainscreenreturn:
 
 ;Exit - waay down here to keep from being overwritten by bios reboot routine
 exit:
-%if 1
+%if 0
 	;Clear screen on way out
 	mov	bx, 7
 	mov	cx, 80
@@ -2238,7 +2536,7 @@ procmbr.end:
 %endif
 
 nobootmsg:
-	mov	si, 7DBEh
+	mov	si, 7D90h
 	mov	bx, 7
 	mov	cx, 42
 .msg	lodsb
@@ -2294,9 +2592,10 @@ bc_uselba	equ	0640h
 .break	mov	dl, [bc_saveddl]
 	push	ds
 	pop	es		; Set ES back to 0 to not confuse reentry point
-	mov	ax, 0E5FFh	; jmp bp
-	mov	[bc_saveddl], ax
-	jmp	0:bc_saveddl
+	xor	ax, ax
+	push	ax
+	push	bp
+	retf			; jmp 0:bp
 .cont	mov	[bc_uselba], byte 0
 	cmp	al, 07Fh
 	jne	.fixed
@@ -2382,7 +2681,9 @@ bc_uselba	equ	0640h
 bootcheckcount:
 	mov	ax, .descend
 	call	bootcheckfixcodeptr
+	push	bp
 	call	bootcheckdescend
+	pop	bp
 	ret
 .descend:
 	xor	bx, bx
@@ -2426,7 +2727,9 @@ bootcheckisfatandlen:
 bootcheckdisk:
 	mov	ax, .descend
 	call	bootcheckfixcodeptr
+	push	bp
 	call	bootcheckdescend
+	pop	bp
 	ret
 .skip	clc
 .error1	ret
@@ -2573,8 +2876,7 @@ bootcheckdisk:
 	pop	cx
 	ret
 
-bootcheckdescend:
-	push	bp
+bootcheckdescend:	; Descend: clobbers all registeres except SS and segment registers
 	mov	bp, ax
 	xor	bx, bx
 	mov	[bc_offsetlow], bx
@@ -2600,14 +2902,23 @@ bootcheckdescend:
 	je	.lbafat
 	cmp	al, 0Eh
 	je	.lbafat
+	cmp	al, 5
+	je	.mbr
+	cmp	al, 0Fh
+	je	.lbambr
 .nxt	mov	[bc_uselba], bx
 	add	si, 10h
 	cmp	si, 01FEh
 	jb	.loop
-.error	pop	bp
-	ret		; CF is cleared by cmp above
+.error	ret		; CF is cleared by cmp above
+.lbambr	or	[bc_uselba], byte 1
+.mbr	mov	ax, bootcheckdescend
+	call	bootcheckfixcodeptr
+	xchg	ax, cx
+	jmp	.act
 .lbafat or	[bc_uselba], byte 1
-.fat	push	si
+.fat	mov	cx, bp
+.act	push	si
 	mov	ax, [bc_offsetlow]
 	mov	dx, [bc_offsethigh]
 	push	ax
@@ -2621,7 +2932,7 @@ bootcheckdescend:
 	add	ax, 20h
 	mov	es, ax
 	push	bp
-	call	bp
+	call	cx
 	pop	bp
 	pop	es
 	pop	dx
@@ -2674,7 +2985,7 @@ bootcheckdiskoprel:
 	call	bootcheckdiskop
 	ret
 .no	mov	ah, 40h	; We can't handle disks > 2TB, but neither can MBR!
-	ret		; This catches a partition that starst within range but ends out of range
+	ret		; This catches a partition that starts within range but ends out of range
 
 bootcheckdiskop:
 	;SI:CX = disk address
@@ -2913,7 +3224,7 @@ bcs_error	db	'SSD Error   ', 13, 10, 0
 align	2, db 0
 
 bootcheck_end:
-; Right now there's plenty of room, but if extended partitions ever happen it will be crammed.
+; It's starting to get tight; much more feature enhancement and it won't fit.
 %if (bootcheck_end - bootcheck) > (512 * 3 - 48)
 %error bootcheck is too long: correct generator to use variable sized bootcheck routine after all
 %endif
@@ -2928,9 +3239,10 @@ bootcheck_end:
 ; Stringtable
 
 s_name	db	0B5h, ' SSD Format ', 0C6h
-s_vsn	db	'v1.0'
+s_vsn	db	'1.8a'		; should start with v but this is unreleased checkpoint
 s_disk	db	'format disk '
 s_mb	db	' MB'
+s_small	db	'Disk is too small'
 s_data1	db	'Disk X has data'
 s_data2	db	'Press Y to erase'
 s_exd1	db	'     Is fixed disk?     '
@@ -2957,6 +3269,7 @@ s_952	db	'5) Win 95 OSR2'
 s_flba	db	'6) Force LBA (95 OSR2)'
 s_derr	db	'SSD Error   '
 s_sysc	db	'Run SYS C: first. Press any key to reboot.'
+s_nbebr	db	'Impossible to boot an EBR by normal means.'
 s_rderr	db	'SDD Read Error'
 s_nptr	db	'No Boot Part'
 s_rebootmsg	db	'Reboot DOS to reread partition table', 13, 10, '$'
@@ -3045,6 +3358,12 @@ dap		equ	bss + 32	; Size = 32 bytes
 bignum		equ	bss + 64	; Size = 8 bytes
 pgbar		equ	bss + 64	; Size = 16 bytes; overlaps bignum
 disklba		equ	bss + 80
+diskebr		equ	bss + 81
+diskebralign	equ	bss + 82	; unused, retained for alginment
+diskebroffset	equ	bss + 84	; Size = 4 bytes
+diskpriorebr	equ	bss + 88	; Size = 4 bytes
+usabledisksize	equ	bss + 92	; Size = 4 bytes, amount usable for this paritition
+usabledisksize2	equ	bss + 96	; Size = 4 bytes, amount usable after this partition
 
 disktable	equ	09000h
 ;[disktable] = bytes per sector
@@ -3052,3 +3371,15 @@ disktable	equ	09000h
 ;[disktable + 4] = heads
 ;[disktable + 6] = cylinders
 ;[disktable + 8] = number of 512 byte sectors
+
+buildtable	equ	0A000h
+;[buildtable] = 0, 12, 16, or 32
+;[buildtable + 1] = partiton type
+;[buildtable + 2] = number of reserved sectors
+;[buildtable + 4] = number of sectors per cluster
+;[buildtable + 6] = number of extra sectors to write (not including MBR/EBR write but including superblock)
+;[buildtable + 8] = offset of start of filesystem
+;[buildtable + 12] = number of sectors allocated to filesystem
+;[buildtable + 16] = number of sectors per fat
+;[buildtable + 20] = number of clusters
+;[buildtable + 24] = offset of start of EBR table (0 = MBR)
