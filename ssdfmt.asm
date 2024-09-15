@@ -1,6 +1,6 @@
 ; Copyright Joshua Hudson 2022-24
 
-; Next up: test boot check on second partition
+; Next up: FAT32 part of rebuild
 
 BITS 16
 CPU 8086
@@ -2681,9 +2681,7 @@ bc_uselba	equ	0640h
 bootcheckcount:
 	mov	ax, .descend
 	call	bootcheckfixcodeptr
-	push	bp
 	call	bootcheckdescend
-	pop	bp
 	ret
 .descend:
 	xor	bx, bx
@@ -2713,7 +2711,7 @@ bootcheckisfatandlen:
 	jne	.skip
 	mov	ax, es:[16h]
 	or	ax, ax
-	jz	.try32
+	jz	.try32		; If we run out of space squeeze one byte here
 	ret
 .try32	mov	ax, es:[24h]
 	mov	dx, es:[26h]
@@ -2727,9 +2725,7 @@ bootcheckisfatandlen:
 bootcheckdisk:
 	mov	ax, .descend
 	call	bootcheckfixcodeptr
-	push	bp
 	call	bootcheckdescend
-	pop	bp
 	ret
 .skip	clc
 .error1	ret
@@ -2740,7 +2736,7 @@ bootcheckdisk:
 	mov	ax, 0201h
 	call	bootcheckdiskoprel
 	jc	.error1
-	;Blanked FAT32 boot sector recovered in the count step above
+	;Blanked FAT32 boot sector skipped in the count step above
 	call	bootcheckisfatandlen
 	jz	.skip
 
@@ -2876,20 +2872,29 @@ bootcheckdisk:
 	pop	cx
 	ret
 
-bootcheckdescend:	; Descend: clobbers all registeres except SS and segment registers
-	mov	bp, ax
+;bootcheckdescend: AX = callback ptr; clobbers all registers except BP, and segment registers
+;Callback is made with ES=pointer to first free buffer, BP = pointer to callback method
+;bc_offsetlow/high are filled so that disk access accesses start at base of partition
+;Callback need preserve only DS and SS (not even BP or ES).
+bootcheckdescend:
 	xor	bx, bx
 	mov	[bc_offsetlow], bx
 	mov	[bc_offsethigh], bx
-	mov	dh, 0
-	mov	dl, [bc_activedisk]
-	mov	cx, 1
+	push	bp
+	mov	bp, ax
+	call	.reentr
+	pop	bp
+	ret
+.reentr	xor	cx, cx
+	xor	si, si
+	xor	bx, bx
 	mov	ax, 0201h
-	int	13h
+	call	bootcheckdiskoprel
 	jc	.error
 	mov	si, 01BEh
 .loop	mov	al, es:[si + 4]
-	mov	bx, [bc_uselba]
+	mov	bl, [bc_uselba]
+	push	bx
 	cmp	al, 1
 	je	.fat
 	cmp	al, 4
@@ -2906,13 +2911,14 @@ bootcheckdescend:	; Descend: clobbers all registeres except SS and segment regis
 	je	.mbr
 	cmp	al, 0Fh
 	je	.lbambr
-.nxt	mov	[bc_uselba], bx
+.nxt	pop	bx
+	mov	[bc_uselba], bl
 	add	si, 10h
 	cmp	si, 01FEh
 	jb	.loop
 .error	ret		; CF is cleared by cmp above
 .lbambr	or	[bc_uselba], byte 1
-.mbr	mov	ax, bootcheckdescend
+.mbr	mov	ax, bootcheckdescend.reentr
 	call	bootcheckfixcodeptr
 	xchg	ax, cx
 	jmp	.act
@@ -2940,13 +2946,14 @@ bootcheckdescend:	; Descend: clobbers all registeres except SS and segment regis
 	mov	[bc_offsetlow], cx
 	mov	[bc_offsethigh], dx
 	pop	si
-	jc	.error
-	jmp	.nxt
+	jnc	.nxt
+	pop	bx
+	jmp	.error
 
 bootcheckfixcodeptr:		; This routine is not a compile time constant from its input
 	;AX = code pointer in base	trashes BX
 	call	.worker
-.adj	sbb	ax, .adj	; Subtracts where assembler thinks .adj is
+.adj	sub	ax, .adj	; Subtracts where assembler thinks .adj is
 	ret
 .worker	mov	bx, sp
 	add	ax, ss:[bx]	; Adds where .adj actually is
