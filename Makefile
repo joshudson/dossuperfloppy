@@ -25,6 +25,9 @@ SSDFMT.TXT: ssdfmt
 SSDFMT.COM: ssdfmt.asm
 	nasm -f bin -o SSDFMT.COM ssdfmt.asm
 
+SSDSCAN.COM: ssdscan.asm
+	nasm -f bin -o SSDSCAN.COM ssdscan.asm
+
 SSDFIXBT.COM: ssdfixbt.asm
 	nasm -f bin -o SSDFIXBT.COM ssdfixbt.asm
 
@@ -49,3 +52,14 @@ NEWIMAGE.COM: newimage.asm
 
 ERRORLVL.COM: errorlvl.asm
 	nasm -f bin -o ERRORLVL.COM errorlvl.asm
+
+BIOSRAM.COM: biosram.asm
+	nasm -f bin -o BIOSRAM.COM biosram.asm
+
+DUMMYCHK.COM: dummycheck.asm
+	nasm -f bin -o DUMMYCHK.COM dummycheck.asm
+
+clean:
+	rm -f LICENSE.TXT FORMATHD.TXT PATCHDOS.COM FORMATHD.COM ISSF.COM FORMATHD.ZIP \
+		SSDFMT.TXT SSDFMT.COM SSDFIXBT.COM POSTNTFS.EXE SSDFMT.ZIP \
+		hdgeometry CMP.COM NEWIMAGE.COM ERRORLVL.COM

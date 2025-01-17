@@ -16,3 +16,4 @@ qemu*.sh
 junk
 junk.asm
 hdgeometry
+scantests/freedos720.img
