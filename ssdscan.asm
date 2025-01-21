@@ -54,8 +54,10 @@ stackbottom	equ	(_endbss - _bss + _end - _start + 100h + 768)
 ; cs:_endbss  top of stack
 ; buf1:0      first FAT buffer
 ; buf2:0      second FAT buffer and cluster data buffer
-; buf3:0      third FAT buffer and dirwalk state buffer
+; buf3:0      third FAT buffer, if we need it
+; buf4:0      working buffer (FAT sort and dirwalk)
 ; buf4:0      XMS bitmap pool buffer, if it exists
+; bitbufseg:0 bitmap buffer, if it needs to exist
 ; cmempool:0  bitmap pool in main memory
 ;
 ; ... additional bitmap pool in dos-allocated RAM
@@ -80,6 +82,10 @@ _start:
 .mem	mov	sp, stackbottom	
 	sub	ax, (stackbottom) / 16
 	mov	[cmem], ax
+	mov	di, _bss			; Zero initialize BSS (saves total code size)
+	mov	cx, (_endbss - _bss) / 2
+	xor	ax, ax
+	rep	stosw
 	mov	si, 81h
 .a	lodsb
 	cmp	al, ' '
@@ -246,13 +252,8 @@ stage_media_descriptor:
 	jl	.mloop
 	mov	dx, msg_noboot
 	jmp	stage_media_descriptor.errorx
-.bpb	xor	cx, cx			; Initialize FAT variables
-	mov	[fatinfosect], cx	; We don't know if there is one yet
-	mov	[rootclust], cx
-	mov	[rootclust + 2], cx
-	mov	[rootdirsects], cx
-	mov	[rootdirsects + 2], cx
-	push	dx			; Save boot sector address for .gmdesc
+.bpb	push	dx			; Save boot sector address for .gmdesc
+	xor	cx, cx			; Split/join control starts with a 0 in CX
 
 	;TODO acutally debug this block when BOGONDOS is up and running.
 	;In theory this would work with logically sectored FAT in some versions of MS-DOS.
@@ -588,48 +589,160 @@ initpools:
 	mov	[buf3seg], cx
 	cmp	[numfats], byte 2
 	jbe	.left2
+	add	cx, ax
+.left2	mov	[buf4seg], ax
 	cmp	ax, 32
-	jb	.left2
-	add	cx, ax		; Typical case for sizing BUF3
-	jmp	.have3
-.left2	add	cx, 32		; BUF3 must be at least 512 bytes for recursive dirwalk
-.have3	mov	[buf4seg], cx
+	jae	.left3
+	mov	ax, 32
+.left3	add	cx, 32		; BUF3 must be at least 512 bytes for recursive dirwalk
+	mov	[bitbufseg], cx
 	; Check if the entire bitmap fits in cmem or not
 	mov	ax, [totalclust]
 	mov	dx, [totalclust + 2]
-	mov	cx, 8
+	mov	cx, 6
 .dec2	shr	dx, 1
 	rcr	ax, 1
 	adc	ax, 0
 	loop	.dec2	; When loop terminates, DX:AX is the entire size required in paragraphs
+	mov	si, bitvectorptrs
 	or	dx, dx
 	jnz	.cbigr
 	mov	dx, ds
 	add	dx, [cmem]
-	sub	dx, [buf4seg]
+	sub	dx, ax
 	jb	.cbigr
-	mov	dx, [buf4seg]
-	mov	[cmempool], dx	; Pool fits in conventional memory, no block needed
-	mov	[cmempoollen], ax
+	mov	[cmempoollen], dx	; Remember rest of conventional memory (in case something needs it)
+	mov	dx, [bitbufseg]		; Pool fits in conventional memory, bitbufseg unneeded
+	mov	[bitvectorptrs], byte b_mem_internal
+	mov	[bitvectorptrs + 2], dx
+	add	dx, ax
+	mov	[cmempool], dx
+	xor	dx, dx
+	mov	cx, [bitbufseg]
+	mov	bl, b_mem_internal
+	call	.mcrec			; Record single entry for all memory
 	jmp	.hmem
-.cbigr	mov	cx, [buf4seg]
-	add	cx, bx		; BX preserved the entire time: size of buf4 required
-	mov	[cmempool], cx
+.mcrec	push	cx
+	mov	cx, 6
+.mcmm	shl	ax, 1
+	rcl	ax, 1
+	loop	.mcmm
+	pop	cx
+	mov	[si], bl
+	mov	[si + 2], cx
+	mov	[si + 4], ax
+	mov	[si + 6], dx
+	ret
+.cbigr	mov	cx, [bitbufseg]
+	add	cx, bx		; BX preserved the entire time: size of bitbufseg required
+	mov	[cmempool], cx	; There's no pool (len = 0); remember length of bitbufseg = cmempool - bitbufseg
 	mov	bx, ds
 	add	bx, [cmem]
 	sub	bx, cx
+	ja	.hcmema
 	jae	.hcmem
 	mov	dx, msg_nocmem2
 	mov	ah, 9
 	int	21h
 	mov	ax, 4C04h	; TODO normalize exit codes
 	int	21h
-.hcmem:
-	db	0x33		; TODO allocate XMS memory
+.hcmema	sub	ax, bx
+	sbb	dx, 0
+	push	ax
+	push	dx
+	mov	ax, bx
+	xor	dx, dx
+	mov	bl, b_mem_internal
+	call	.mcrec
+	pop	dx
+	pop	ax
+.hcmem	db	0x33		; TODO allocate memory from DOS, UMB, and XMS
 
 .hmem:
-	; Might as well read into all buffers now we will need the reads anyway
-	xor	dx, dx
+	; Zero memory map
+	mov	si, bitvectorptrs
+.lfatl	mov	al, [si]
+	cmp	al, byte 0
+	je	.lfat0
+	cmp	al, byte b_mem_xms
+	jb	.h0seg
+	; It's some kind of API-swapped memory
+	test	[opflags + 1], byte opflag2_cbf
+	jnz	.cfbc
+	mov	es, [bitbufseg]
+	xor	di, di
+	mov	cx, [cmempool]
+	sub	cx, [bitbufseg]
+	shl	cx, 1
+	shl	cx, 1
+	shl	cx, 1
+	xor	ax, ax
+	rep	stosw
+	mov	[xms_xfer_len + 2], word 0
+	call	xmssegsrc
+	or	[opflags + 1], byte opflag2_cbf
+.cfbc	mov	ax, [si + 4]
+	mov	dx, [si + 6]
+	mov	bx, ax
+	mov	di, dx
+	mov	cx, [cmempool]
+	sub	cx, [bitbufseg]
+.cfbcl	or	dx, dx
+	jnz	.cfbcb
+.cfbcl2	cmp	ax, cx
+	ja	.cfbcb
+	mov	cx, ax
+.cfbcb	mov	[xms_xfer_len], cx		; Right now the only kind of API-swapped memory is XMS so we do that.
+	mov	[xms_xfer_dstoff], bx
+	mov	[xms_xfer_dstoff + 2], di
+	push	si
+	push	ax
+	mov	si, [si + 2]
+	mov	[xms_xfer_src], si
+	mov	ah, 0bh
+	call	far [xmsaddr]
+	pop	ax
+	pop	si
+	add	bx, cx
+	add	di, 0
+	sub	ax, cx
+	sbb	dx, 0
+	jnz	.cfbcl2
+	test	ax, ax
+	jnz	.cfbcl
+	jmp	.lfatn
+.h0seg	mov	es, [si + 2]
+	mov	ax, [si + 4]
+	mov	dx, [si + 6]
+	shr	dx, 1
+	rcr	ax, 1
+	adc	ax, 0
+	shr	dx, 1
+	rcr	ax, 1
+	adc	ax, 0
+	shr	ax, 1
+	adc	ax, 0
+	push	ax
+	xor	ax, ax
+	or	dx, dx
+	jz	.h0snl
+.h0sl	mov	cx, 32768
+	xor	di, di
+	rep	stosw
+	mov	ax, es
+	add	ax, 1000h
+	mov	es, ax
+	dec	dx
+	jnz	.h0sl
+.h0snl	pop	cx
+	xor	di, di
+	rep	stosw
+.lfatn	add	si, 8
+	cmp	si, bitvectorptrs + (8 * 128)
+	jl	.lfatl
+
+	; Final Media Descriptor Check; any FAT have a Media Descriptor?
+.lfat0	xor	dx, dx
 	xor	si, si
 	mov	ax, [reservedsects]
 	mov	cl, [numfats]
@@ -858,11 +971,11 @@ diskreadwrite:
 	test	[opflags + 1], byte opflag2_bigdisk
 	;jnz	.fat32
 	add	bx, ax		; Check if we know it's big already
-	;jc	.big
+	jc	.big
 	or	dx, dx
-	;jnz	.big
+	jnz	.big
 	test	[opflags + 1], byte opflag2_bigdisk
-	;jnz	.big
+	jnz	.big
 	lds	bx, [bp - 10]
 	mov	cx, [bp - 12]
 	mov	dx, [bp - 16]
@@ -910,6 +1023,24 @@ diskreadwrite:
 	ret
 .keepc	popf
 	stc
+	ret
+
+xmssegsrc:	; ES -> XMS SRC; destroys AX, CX, DX
+	mov	ax, es
+	mov	cx, 16
+	mul	ax
+	mov	[xms_xfer_src], word 0
+	mov	[xms_xfer_srcoff], ax
+	mov	[xms_xfer_srcoff + 2], dx
+	ret
+
+xmssegdst:	; ES -> XMS DST; destroys AX, CX, DX
+	mov	ax, es
+	mov	cx, 16
+	mul	ax
+	mov	[xms_xfer_dst], word 0
+	mov	[xms_xfer_dstoff], ax
+	mov	[xms_xfer_dstoff + 2], dx
 	ret
 
 
@@ -993,11 +1124,23 @@ descriptor	resb	1
 preserve_sp	resb	2		; Disk access slaughters these registers but we need them back _immediately_
 preserve_bp	resb	2		; These are accessed from cs but we build with cs = ds
 
+xmsaddr		resb	4
+fatinbuf	resb	4
+fatinbitmask	resb	4
+bitmasklen	resb	2
+		resb	2
+
 _endbss:
 
 bitvectoroffset	equ	0
 bitvectorptr	equ	4
 bitvectortype	equ	6
+
+b_mem_internal	equ	1
+b_mem_dos	equ	2
+b_mem_umb	equ	3
+b_mem_high	equ	4
+b_mem_xms	equ	5
 
 opflag_f	equ 1
 opflag_c	equ 2
@@ -1005,3 +1148,4 @@ opflag_d	equ 4
 opflag2_bigdisk	equ 1
 opflag2_7305	equ 2
 opflag2_ebpb	equ 4
+opflag2_cbf	equ 8
