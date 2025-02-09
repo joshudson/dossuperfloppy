@@ -77,8 +77,8 @@ _start:
 .nomem	mov	dx, msg_nocmem
 	mov	ah, 9
 	int	21h
-	mov	ax, 4C04h
-	int	21h
+	mov	ax, 4C04h			; We can *NOT* jump to exit here; this will trash DOS
+	int	21h				; as the exit-free memory is unintialized
 .mem	mov	sp, stackbottom	
 	sub	ax, (stackbottom) / 16
 	mov	[cmem], ax
@@ -450,10 +450,12 @@ stage_media_descriptor:
 	pop	bx
 	xchg	ax, bx
 	div	cx
-	add	ax, 2
-	adc	bx, 0
 	mov	[totalclust + 2], bx
 	mov	[totalclust], ax
+	add	ax, 2
+	adc	bx, 0
+	mov	[highestclust + 2], bx
+	mov	[highestclust], ax
 	cmp	bx, 0
 	jne	.f32
 	cmp	ax, 0FFF6h
@@ -470,20 +472,15 @@ stage_media_descriptor:
 	; We've finished extracting all information from the boot sector
 
 	mov	bx, 1			; Find sectors per chunk
-.spcn	shl	bx, 1			; So the idea here is if we have an actually aligned
-	cmp	bx, 32			; filesystem on an SSD it will read and write in SSD-sized
-	je	.spc2			; sectors even when the DOS sector size is smaller.
-	cmp	bx, [sectsperclust]
-	ja	.spc0
-	cmp	[sectsperfat + 2], word 0
-	jne	.spc1
-	cmp	bx, [sectsperfat]
-	ja	.spc0
-.spc1	cmp	bx, [rootdirsects]
-	jbe	.spcn
-	ja	.spc0
-.spc0	shr	bx, 1
-.spc2	mov	[sectsperchunk], bx
+.spcn	test	bx, [sectsperclust]	; So the idea here is if we have an actually aligned
+	jnz	.spcf			; filesystem on an SSD it will read and write in SSD-sized
+	test	bx, [sectsperfat]	; sectors even while the DOS sector size is smaller
+	jnz	.spcf			; Note this is a modulus test; otherwise the FAT checker
+	test	bx, [rootdirsects]	; will trash data.
+	jnz	.spcf
+	shl	bx, 1
+	jmp	.spcn
+.spcf	mov	[sectsperchunk], bx
 
 	xor	dx, dx			; Find offset to first cluster
 	xor	ax, ax
@@ -498,6 +495,12 @@ stage_media_descriptor:
 	adc	dx, 0
 	mov	[firstclustsect], ax
 	mov	[firstclustsect + 2], dx
+	sub	ax, [sectsperclust]
+	sbb	dx, 0
+	sub	ax, [sectsperclust]
+	sbb	dx, 0
+	mov	[zerothclustsect], ax
+	mov	[zerothclustsect], dx
 	
 	test	[opflags], byte opflag_d
 	jz	initpools
@@ -555,12 +558,16 @@ display1:
 	; Initialize buffer pools
 
 initpools:
+	mov	cx, fptrcnt
 	cmp	[fattype], byte 16
 	je	.is16
 	cmp	[fattype], byte 32
 	je	.is32
 
 	; FAT12: pool size is entire fat
+	mov	si, fptrs12
+	mov	di, entryfromblock
+	rep	movsw
 	mov	ax, [sectsperfat]
 	mul	word [bytespersector]	; Cannot overflow
 	mov	cl, 4
@@ -568,9 +575,15 @@ initpools:
 	mov	bx, 64
 	jmp	.initall
 
-.is16	mov	ch, 8			; FAT16: every 8 bytes of FAT is 1 byte of bitmap
+.is16	mov	si, fptrs16
+	mov	di, entryfromblock
+	rep	movsw
+	mov	ch, 8			; FAT16: every 8 bytes of FAT is 1 byte of bitmap
 	jmp	.in12
-.is32	mov	ch, 16			; FAT32: every 16 bytes of FAT is 1 byte of bitmap
+.is32	mov	si, fptrs32
+	mov	di, entryfromblock
+	rep	movsw
+	mov	ch, 16			; FAT32: every 16 bytes of FAT is 1 byte of bitmap
 .in12	mov	ax, [sectsperchunk]
 	mul	word [bytespersector]	; Cannot overflow
 	mov	cl, 4
@@ -597,8 +610,8 @@ initpools:
 .left3	add	cx, 32		; BUF3 must be at least 512 bytes for recursive dirwalk
 	mov	[bitbufseg], cx
 	; Check if the entire bitmap fits in cmem or not
-	mov	ax, [totalclust]
-	mov	dx, [totalclust + 2]
+	mov	ax, [highestclust]		; Wasting two bits is worth it in instructions saved
+	mov	dx, [highestclust + 2]
 	mov	cx, 6
 .dec2	shr	dx, 1
 	rcr	ax, 1
@@ -833,6 +846,258 @@ initpools:
 	or	bp, 1
 .mddone	call	checkmark
 
+stage_fat:
+	add	[total_clust], word 2		; I 
+	adc	[total_clust + 2], word 0
+	mov	dx, state_fat
+	mov	ah, 9
+	int	21h
+
+	mov	ax, bp
+	mov	bp, sp
+	sub	sp, 
+	;bp - 1: dirty flags for each FAT
+	;bp - 2: bad block flags for ech FAT
+	;bp - 6: lowest cluster number in FAT block
+	;bp - 10: active cluster number in FAT block
+	;bp - 14: one more than last cluster number in FAT block
+	;bp - 16: number of words in a FAT block
+	;bp - 18: number of entries in a FAT block
+	;bp - 20: best FAT so far
+	;bp - 22: quality of best FAT so far
+	xor	dx, dx
+	mov	[bp - 2], ax
+	mov	[bp - 4], dx
+	mov	[bp - 6], dx
+	mov	[bp - 8], dx
+	mov	[bp - 10], dx
+
+.fat_block_loop:
+	;FAT blocks are loaded; prepare current counter
+	cmp	[fattype], byte 12
+	jne	.loop_top_not12
+	mov	ax, [sectspefat]	; Yup all of them
+	mov	di, 3
+	jmp	.loop_top_common	; You think I'm going to page a FAT12? You're outta your mind.
+.loop_top_not12:
+	mov	ax, [bytespersector]
+	mul	ax, [sectsperchunk]
+	shr	dx, 1
+	rcr	ax, 1
+	mov	di, 1
+	cmp	[fattype], byte 16
+	je	.loop_top_skip
+	shr	dx, 1
+	rcr	ax, 1			; Cannot underflow
+	mov	di, 2
+.loop_top_skip:
+	add	ax, [bp - 10]
+	adc	dx, [bp - 8]
+.loop_top_common:
+	mov	bx, [highestclust]
+	mov	cx, [highestclust + 2]
+	cmp	dx, cx
+	jb	.loop_top_common_short
+	cmp	ax, bx
+	jae	.loop_top_common_short
+	mov	ax, bx
+	mov	dx, cx
+.loop_top_common_short:
+	mov	[bp - 14], ax
+	mov	[bp - 12], dx
+	sub	ax, [bp - 6]
+	sub	dx, [bp - 4]
+	div	di			; Cannot overflow
+	or	dx, dx
+	jz	.loop_top_common_store
+	inc	ax
+.loop_top_common_store:
+	mov	[bp - 16], ax
+	call	[entriesperblock]
+	mov	[bp - 18], ax
+	xor	ax, ax
+	mov	[bp - 20], ax	; Nothing selected yet
+	mov	[bp - 22], ax	; Unevaluated
+	mov	cl, 0
+
+	cmp	[numfats], byte 3
+	jb	.quantify_loop
+	mov	al, [bp - 2]		; Special case for 3 FATS
+	and	al, 6			; Check if 2 and 3 are equal
+	jnz	.quantify_loop
+	mov	es, [buf3seg]
+	push	ds
+	mov	ds, [buf2seg]
+	call	fat_compare
+	pop	ds
+	jne	.quantify_loop
+	mov	[bp - 20], es
+	mov	es, [buf1seg]
+	push	ds
+	mov	ds, [bp - 20]
+	call	fat_compare
+	jne	.ncpy31
+	call	fat_copy
+	or	[bp - 1], byte 1
+.ncpy31	pop	ds
+	jmp	.quantify_apply_finished
+
+.quantify_loop:
+	mov	ch, 0
+	shl	ch, cl
+	test	[bp - 2], ch
+	jnz	.bad
+	mov	ch, 0
+	mov	si, buf1seg
+	add	si, cx
+	add	si, cx
+	mov	es, [si]
+	cmp	[bp - 20], word 0
+	je	.quantify_free
+	cmp	[bp - 22], word 0
+	jne	.quantify_have
+	push	es
+	mov	es, [bp - 20]
+	call	fat_quantify
+	pop	es
+.quantify_have:
+	push	ds
+	mov	ds, [bp - 20]
+	call	fat_compare
+	pop	ds
+	jnz	.quantify_worse		; Actually equal; don't bother quantify
+	call	fat_quantify
+	cmp	ax, [bp - 20]
+	jbe	.quantify_worse
+.quantify_free:
+	mov	[bp - 20], es
+	mov	[bp - 22], ax
+.quantify_worse:
+	inc	cl
+	cmp	cl, [numfats]
+	jb	.quantify_loop
+	cmp	[bp - 20], word 0
+	jne	.quantify_have1
+	mov	dx, msg_nogoodfat
+	mov	ah, 9
+	int	21h
+	mov	al, 3		; TODO normalize exit codes
+	jmp	exit
+.nofixfatdiff:
+	mov	al, 3		; TODO normalize exit codes
+	jmp	exit
+
+.quantify_have1:
+	mov	cl, 0
+.quantify_apply_loop:
+	mov	ch, 0
+	mov	si, buf1seg
+	add	si, cx
+	add	si, cx
+	mov	ax, [si]
+	mov	bx, [bp - 20]
+	cmp	ax, bx
+	je	.quantify_apply_bottom
+	mov	es, ax
+	push	ds
+	mov	ds, bx
+	mov	ch, 1
+	shl	ch, cl
+	test	[bp - 2], ch
+	jnz	.quantify_mustapply
+	call	fat_compare
+	jz	.quantify_noapply
+.quantify_mustapply:
+	call	fat_copy
+	or	[bp - 1], ch
+.quantify_noapply:
+	pop	ds
+.quantify_apply_bottom:
+	inc	cl
+	cmp	cl, [numfats]
+	jb	.quantify_apply_loop
+.quantify_apply_finished:
+
+	mov	al, [bp - 1]
+	or	al, [bp - 2]
+	xor	al, [bp - 2]
+	jz	.allsame
+	mov	cx, state_fat
+	mov	dx, query_fatdiff
+	call	queryfixyn
+	cmp	al, 'y'
+	jne	.nofixfatdiff
+	; Actual fix happens at writeback time
+.allsame:
+	xor	di, di
+	cmp	[bp - 6], di
+	jne	.notfirst
+	cmp	[bp - 4], di
+	jne	.notfirst
+	call	[entryfromblock]
+	cmp	al, [descriptor]
+	je	.isdesc
+	call	[ismdesc]
+	je	.isdesc
+	mov	cx, state_fat
+	mov	dx, query_anomalous
+	call	queryfixyn
+	cmp	al, 'y'
+	je	.fxdesc
+	mov	al, 4		; TODO normalize exit codes
+	jmp	exit		; Can't risk continuing as this could destroy entire FS
+.fxdesc	mov	ah, 0FFh
+	mov	dx, 0FFFFh
+	mov	al, [descriptor]
+	call	entrytoblock
+	mov	[bp - 1], byte 7	; All same, ergo all changed
+.isdesc	inc	di
+	call	[entryfromblock]
+	cmp	[rootclust], word 1
+	jne	.secondnormal
+	cmp	[rootclust + 2], word 0
+	jne	.secondnormal
+	mov	[rootclust], ax
+	mov	[rootclust + 2], dx
+	jmp	.secondfinish
+.secondnormal:
+	cmp	al, 0FFh
+	jne	.secondfix
+	call	[ismdesc]
+	jne	.secondfinish
+	mov	cx, state_fat
+	mov	dx, query_anomalous
+	call	queryfixyn
+	cmp	al, 'y'
+	jne	.secondfinish
+	mov	ax, 0FFFFh
+	mov	dx, ax
+	call	[entrytoblock]
+	mov	[bp - 1], byte 7	; All same, ergo all changed
+.secondfinish:
+	inc	di
+.notfirst:
+	;*NOW* we can scan the FAT and update bitmaps
+
+	;TODO: writeback, prompting for bad sectors if necessary
+
+	;Advance loop
+	mov	ax, [bp - 6]
+	mov	dx, [bp - 4]
+	add	ax, [bp - 18]
+	adc	dx, 0
+
+	cmp	dx, [highestclust + 2]
+	jb	.loopmore
+	cmp	ax, [highsestclust]
+	ja	.exitloop
+.loopmore:
+	;Read in sectors for next loop
+
+	jmp	.fatblockloop
+.exitloop:
+	
+
 	mov	al, 0
 exit:	mov	ah, 4Ch
 	; There will be free XMS, etc. here
@@ -847,7 +1112,7 @@ newbadsectors:
 
 ; CX = state string
 ; DX = question string
-; returns al = 'y' or 'n'
+; returns al = 'y' or 'n', preserves all other registers
 queryfixyn:
 	push	dx
 	mov	dx, out_cr
@@ -931,6 +1196,322 @@ checkmark:
 	pop	ax
 	ret
 
+	; Entry point; DX:AX = base cluster no, DI = offset
+	; Result in CH; destroys everything but DI and ES
+getbitsclustdi:
+	add	ax, di
+	adc	dx, 0
+	;DX:AX = base cluster
+getbitsclust:
+	push	es
+	call	bitsclustcommon
+	mov	ch, [es:bx]
+	shr	ch, cl
+	pop	es
+	and	ch, 3
+	ret
+
+	; bits to set in bottom two bits of CL
+setbitsclustdi:
+	add	ax, di
+	adc	dx, 0
+setbitsclust:
+	push	es
+	push	cx
+	call	bitsclustcommon
+	pop	ax
+	shl	al, cl
+	or	[es:bx], al
+	pop	es
+	ret
+
+	; bits to clear are set in bottom two bits of CL
+clearbitsclustdi:
+	add	ax, di
+	adc	dx, 0
+clearbitsclust:
+	push	es
+	push	cx
+	call	bitsclustcommon
+	pop	ax
+	and	al, 3
+	shl	al, cl
+	not	al
+	and	[es:bx], al
+	pop	es
+	ret
+
+bitsclustcommon:
+	mov	si, bitvectorptrs
+.loop	cmp	[si + 6], dx
+	ja	.this
+	jb	.next
+	cmp	[si + 4], ax
+	jae	.this
+.next	sub	ax, [si + 4]
+	sbb	dx, [si + 6]
+	add	si, 8
+	jmp	.loop
+.this	cmp	[si], byte b_mem_xms
+	je	.xms
+	ja	.fault
+	mov	es, [si + 2]	; It's addressible memory
+	mov	cl, al
+	and	cl, 3
+	shl	cl, 1
+	shr	dx, 1
+	rcr	ax, 1
+	shr	dx, 1
+	rcr	ax, 1
+	mov	bx, ax
+	ret
+.xms	int3	; TODO fetch from XMS
+.fault	int3
+
+;Routines used by FAT repair
+;bp - 16: number of words in a FAT block
+;Destroys no registers, output in Z flag
+fat_compare:
+	push	si
+	push	di
+	push	cx
+	xor	si, si
+	mov	cx, [bp - 16]
+	xor	di, di
+	repe	cmpsw
+	pop	cx
+	pop	di
+	pop	si
+	ret
+
+fat_copy:
+	push	si
+	push	di
+	push	cx
+	xor	si, si
+	mov	cx, [bp - 16]	; words per block
+	xor	di, di
+	rep	movsw
+	pop	cx
+	pop	di
+	pop	si
+	ret
+
+	;[bp - 18] = entries per block
+fat_quantify:
+	push	es
+	mov	es, [bufseg4]
+	pop	ds
+	call	fat_copy
+	push	cs
+	pop	ds
+	push	bx
+	push	cx
+	push	dx
+	push	si
+	push	di
+	mov	ax, [bp - 18]
+	push	bp
+	mov	bp, sp
+	sub	sp, 12
+	mov	[bp - 2], ax		; Entries per block
+
+	;Shell sort
+	mov	bx, shelltabs_end - 2
+.loop1	mov	[bp - 4], bx		; Advancer
+	mov	si, [bp - 4]		; Current
+	mov	[bp - 6], bx		; Current gap
+.loop2	mov	di, si			; Ahead
+	call	[entryfromblock]
+	mov	[bp - 8], ax
+	mov	[bp - 10], dx
+.loop3	sub	di, [bp - 6]
+	jb	.l3x1
+	call	[entryfromblock]
+	cmp	dx, [bp - 10]
+	jb	.l3x2
+	ja	.a
+	cmp	ax, [bp - 8]
+	jbe	.l3x2
+	add	di, [bp - 6]
+	call	[entrytoblock]
+	sub	di, [bp - 6]
+	jmp	.loop3
+.l3x1	add	di, [bp - 6]
+.l3x2	mov	ax, [bp - 8]
+	mov	dx, [bp - 10]
+	call	[entrytoblock]
+	inc	si
+	cmp	si, [bp - 2]
+	jl	.loop2
+	mov	bx, [bp - 4]
+	dec	bx
+	dec	bx
+	cmp	bx, shelltabs_end
+	jae	.loop1
+
+	xor	di, di	; Advancer
+	xor	si, si	; Counter
+	xor	ax, ax
+	xor	dx, dx
+.loopa	push	dx			; Ended up being tight because I have to rotate registers anyway
+	push	ax
+	call	[entryfromblock]
+	pop	bx
+	pop	cx
+	cmp	dx, 0
+	jne	.nz
+	cmp	ax, 1
+	jbe	.laa
+.nz	cmp	dx, 0FFFFh
+	jne	.nf
+	cmp	ax, 0FFFFh
+	je	.laa
+.nf	cmp	ax, bx
+	jne	.ns
+	cmp	dx, cx
+	je	.laa
+.ns	cmp	dx, [highestclust + 2]
+	ja	.laa
+	jb	.nh
+	cmp	ax, [highestclust]
+	ja	.laa
+.nh	inc	si
+.laa	inc	di
+	cmp	di, [bp - 2]
+	jb	.aloop
+	mov	ax, si
+	or	ax, ax
+	jnz	.hdat
+	cmp	[es:0], word 0		; Causes all tiny to win over all empty (recovered bad block in FAT)
+	je	.ndat
+.hdat	inc	ax
+.ndat:
+
+	mov	sp, bp
+	pop	bp
+
+	pop	di
+	pop	si
+	pop	dx
+	pop	cx
+	pop	bx
+	ret
+
+; FAT12 has entries that span sectors but we don't play that game; we loaded the whole FAT in that case
+entryfromblock12:
+	xor	dx, dx
+	call	calcoffset12
+	mov	ax, [es:bx]
+	jc	.odd
+	and	ax, 0FFFh
+	ret
+.odd	mov	cl, 4
+	shr	ax, cl
+	ret
+
+entrytoblock12:
+	and	ax, 0FFFh		; Stupid trick: set media descriptor sends too many bits
+	call	calcoffset12
+	jc	.odd
+	and	[es:bx], word 0FFFh
+	or	[es:bx], ax
+	ret
+.odd	mov	cl, 4
+	shl	ax, cl
+	and	[es:bx], byte 0Fh
+	or	[es:bx], ax
+	ret
+
+calcoffset12:
+	mov	bx, di
+	add	bx, di
+	add	bx, di
+	shr	bx, 1
+	ret
+
+entriesperblock12:
+	mov	ax, [highestclust]
+	ret
+
+isendchain12:
+	cmp	ax, 0FF7h
+	ret
+
+isbadblock12:
+	cmp	ax, 0FF7h
+	je	.ret
+	cmp	ax, 0FF8h
+.ret	ret
+
+ismdesc16:
+	cmp	ah, 00Fh
+	ret
+
+entryfromblock16:
+	xor	dx, dx
+	mov	bx, di
+	add	bx, di
+	mov	ax, [es:bx]
+	ret
+
+entrytoblock16:
+	mov	bx, di
+	add	bx, di
+	mov	[es:bx], ax
+entriesperblock16:
+	ret
+
+isendchain16:
+	cmp	ax, 0FFF7h
+	ret
+
+isbadblock16:
+	cmp	ax, 0FFF7h
+	je	.ret
+	cmp	ax, 0FFF8h
+.ret	ret
+
+ismdesc16:
+	cmp	ah, 0FFh
+	ret
+
+entryfromblock32:
+	mov	bx, di
+	shl	bx, 1
+	shl	bx, 1
+	mov	ax, [es:bx]
+	mov	dx, [es:bx + 2]
+	ret
+
+entrytoblock32:
+	mov	bx, di
+	shl	bx, 1
+	shl	bx, 1
+	mov	[es:bx], ax
+	mov	[es:bx + 2], dx
+	ret
+
+entriesperblock32:
+	shr	ax, 1
+	ret
+
+isendchain32:
+	cmp	dx, 0FFFFh
+	jnb	isendchian16
+	ret
+
+isbadblock32:
+	cmp	dx, 0FFFFh
+	je	isbadblock16
+	ret
+
+ismdesc32:
+	cmp	dx, 0FFFFh
+	jne	.ret
+	cmp	ah, 0FFh
+.ret	ret
+	
 
 diskwrite:
 	mov	cl, 1
@@ -969,7 +1550,7 @@ diskreadwrite:
 	mov	[bp - 6], ds
 	mov	[bp - 4], cx
 	test	[opflags + 1], byte opflag2_bigdisk
-	;jnz	.fat32
+	jnz	.fat32
 	add	bx, ax		; Check if we know it's big already
 	jc	.big
 	or	dx, dx
@@ -1043,6 +1624,36 @@ xmssegdst:	; ES -> XMS DST; destroys AX, CX, DX
 	mov	[xms_xfer_dstoff + 2], dx
 	ret
 
+	align 2, db 0CCh
+
+shelltabs	dw	1, 3, 6, 13, 28, 61, 134, 294, 646, 1421, 3126, 6877
+shelltabs_end:
+
+fptrcnt	equ	8
+fptrs12:
+	dw	entryfromblock12
+	dw	entrytoblock12
+	dw	entriesperblock12
+	dw	isendchain12
+	dw	isbadblock12
+	dw	ismdesc12
+
+fptrs16:
+	dw	entryfromblock16
+	dw	entrytoblock16
+	dw	entriesperblock16
+	dw	isendchain16
+	dw	isbadblock16
+	dw	ismdesc16
+
+fptrs32:
+	dw	entryfromblock32
+	dw	entrytoblock32
+	dw	entriesperblock32
+	dw	isendchain32
+	dw	isbadblock32
+	dw	ismdesc32
+
 
 msg_usage	db	'Usage: SSDSCAN DRIVE: [/F] [/C] [/D]', 13, 10
 		db	'/F   Fix errors without prompting', 13, 10
@@ -1073,6 +1684,10 @@ msg_noboot	db	'Failed to find a valid boot sector', 13, 10, '$'
 msg_badmdesc	db	'Encountered a bad sector trying to read media descriptor.', 13, 10
 msg_nomdesc	db	"Media Descriptor does not correspond to boot sector.", 13, 10, "Most likely this isn't a FAT filesystem after all.", 13, 10, '$'
 query_bootsect	db	"Boot sector damaged, however a backup boot sector was found. Restore it?", 13, 10, '$'
+query_fatdiff	db	"FATs disagree, repair?", 13, 10, '$'
+query_anomalous	db	"Anomalous record in FAT, repair?", 13, 10, '$'
+msg_nogoodfat	db	"Correlated bad sectors destroyed FAT.", 13, 10, '$'
+msg_rootdirlost	db	"Root directory lost", 13, 10, '$'
 msg_replacer	db	"New bad sector encountered reading SSD; advise immediate replacement", 13, 10, '$'
 msg_replace	db	"Bad sector encountered writing to SSD; advise immediate replacement", 13, 10, '$'
 
@@ -1092,6 +1707,19 @@ xms_xfer_dst	resb	2
 xms_xfer_dstoff	resb	4
 
 bitvectorptrs	resb	8 * 128
+		; 0 = kind
+		; 1 = control flag
+		; 2 = base address descriptor
+		; 4 = length
+
+entryfromblock	resb	2		; Function pointers
+entrytoblock	resb	2
+entriesperblock	resb	2
+isendchain	resb	2
+isbadblock	resb	2
+ismdesc		resb	2
+		resb	2
+		resb	2
 
 cmem		resb	2		; Number of usable paragraphs of conventional memory in our memory block beyond the stack
 opflags		resb	2
@@ -1114,6 +1742,11 @@ rootclust	resb	4
 rootdirentries	resb	4
 sectsperfat	resb	4
 firstclustsect	resb	4
+
+zerothclustsect	resb	4
+highestclust	resb	4
+		resb	4
+		resb	4
 
 rootdirsects	resb	4
 bitbufseg	resb	2
