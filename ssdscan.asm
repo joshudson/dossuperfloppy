@@ -23,7 +23,7 @@ ORG 0100h
 ;  bad blocks get value 11 immediately
 ;  repair a free referenced cluster as a terminal referenced cluster
 ;  update counters for allocated, inbound references, and outbound references
-;  set flag on crosslink, don't repair yet
+;  repair (truncate) crosslink
 ; at the end of this loop we can prove there are no 01 remaining as they would have been repaired
 
 ;Directory Structure:
@@ -31,12 +31,10 @@ ORG 0100h
 ;  perform basic validation of directory entries; skip any LFS entries and volume label
 ;  if a file has no clusters its length must be zero
 ;  mark starting cluster as reached
-;  if length flag check set, or xlink flag is set, traverse FAT, checking if chain ends too soon or too late
+;  if length flag check set, traverse FAT, checking if chain ends too soon or too late
 ;    if too soon, ask extend or free
 ;    if too late, must truncate
-;    as we traverse each cluster, change its bitmap entry to 01; if it already is 01 repair the xlink
-;      options are duplicate, truncate this file, truncate other file, get other file name
-;      get other file name starts a traversal looking for the other file's identity
+;    as we traverse each cluster, change its bitmap entry to 01; if it already is 01 it must be a bad sector
 
 ;Recovering lost files (we know by counters if we need to run this or not)
 ; traverse bitmap array, recover any lost files; they have value 10 in the bitmap array
@@ -605,11 +603,11 @@ initpools:
 	cmp	[numfats], byte 2
 	jbe	.left2
 	add	cx, ax
-.left2	mov	[buf4seg], ax
+.left2	mov	[buf4seg], cx
 	cmp	ax, 32
 	jae	.left3
 	mov	ax, 32
-.left3	add	cx, 32		; BUF3 must be at least 512 bytes for recursive dirwalk
+.left3	add	cx, 32		; BUF4 must be at least 512 bytes for recursive dirwalk
 	mov	[bitbufseg], cx
 	; Check if the entire bitmap fits in cmem or not
 	mov	ax, [highestclust]		; Wasting two bits is worth it in instructions saved
@@ -840,6 +838,7 @@ initpools:
 	xor	ax, ax
 	xor	dx, dx
 	xor	bx, bx
+	mov	ch, 0
 	call	diskwrite
 	xor	dx, dx			; Repair boot sector clobbered buf1; reload
 	mov	ax, [reservedsects]
@@ -878,19 +877,15 @@ stage_fat:
 	cmp	[fattype], byte 12
 	jne	.loop_top_not12
 	mov	ax, [sectsperfat]	; Yup all of them
-	mov	di, 3
+	xor	dx, dx
 	jmp	.loop_top_common	; You think I'm going to page a FAT12? You're outta your mind.
 .loop_top_not12:
 	mov	ax, [bytespersector]
-	mul	word [sectsperchunk]
-	shr	dx, 1
-	rcr	ax, 1
-	mov	di, 1
+	mul	word [sectsperchunk]	; A chunk can't be bigger than 32KB so DX is always 0
+	shr	ax, 1
 	cmp	[fattype], byte 16
 	je	.loop_top_skip
-	shr	dx, 1
-	rcr	ax, 1			; Cannot underflow
-	mov	di, 2
+	shr	ax, 1
 .loop_top_skip:
 	add	ax, [bp - 6]
 	adc	dx, [bp - 4]
@@ -907,11 +902,7 @@ stage_fat:
 	mov	[bp - 14], ax
 	mov	[bp - 12], dx
 	sub	ax, [bp - 6]
-	sub	dx, [bp - 4]
-	div	di			; Cannot overflow
-	or	dx, dx
-	jz	.loop_top_common_store
-	inc	ax
+	call	[entriestowords]
 .loop_top_common_store:
 	mov	[bp - 16], ax
 	call	[entriesperblock]
@@ -966,12 +957,9 @@ stage_fat:
 .quantify_need:
 	push	es
 	mov	es, [bp - 20]
-	call	checkmark		; DEBUG got here
 	call	fat_quantify
-	call	checkmark		; DEBUG not getting here
 	pop	es
 .quantify_have:
-	call	checkmark		; DEBUG not getting here
 	call	fat_quantify
 	cmp	ax, [bp - 20]
 	jbe	.quantify_worse
@@ -1055,8 +1043,7 @@ stage_fat:
 .fxdesc	mov	ah, 0FFh
 	mov	dx, 0FFFFh
 	mov	al, [descriptor]
-	call	entrytoblock
-	mov	[bp - 1], byte 7	; All same, ergo all changed
+	call	entrytoblockall
 .isdesc	inc	di
 	call	[entryfromblock]
 	cmp	[rootclust], word 1
@@ -1081,8 +1068,7 @@ stage_fat:
 	jne	.secondfinish
 	mov	ax, 0FFFFh
 	mov	dx, ax
-	call	[entrytoblock]
-	mov	[bp - 1], byte 7	; All same, ergo all changed
+	call	entrytoblockall
 .secondfinish:
 	inc	di
 .notfirst:
@@ -1102,8 +1088,7 @@ stage_fat:
 	mov	dx, 0FFFh
 	mov	al, [descriptor]
 	mov	ah, dh
-	call	[entrytoblock]
-	mov	[bp - 1], byte 7
+	call	entrytoblockall
 .endchain:
 	mov	ax, [bp - 6]
 	mov	dx, [bp - 4]
@@ -1118,31 +1103,25 @@ stage_fat:
 	mov	ax, [bp - 6]
 	mov	dx, [bp - 4]
 	call	getbitsclustdi
-	test	cl, 1
+	test	ch, 1
 	jz	.clustdone
 	mov	cx, state_fat
 	mov	dx, query_freealloc
 	call	queryfixyn
 	cmp	al, 'y'
 	je	.setendchain	 ; If the user says no, file will be truncated on scan pass
-	call	incxlinkcount
 	jmp	.clustdone
 .notfree:
 	call	[isbadblock]
 	jne	.notbadblock
 	mov	ax, [bp - 6]
 	mov	dx, [bp - 4]
-	call	getbitsclustdi
-	test	cl, 1
-	jne	.notbadblocknoflag
-	call	incxlinkcount
-.notbadblocknoflag:
-	mov	ax, [bp - 6]
-	mov	dx, [bp - 4]
 	mov	cl, 3
 	call	setbitsclustdi
 	jmp	.clustdone
 .notbadblock:
+	call	[isendchain]
+	jae	.endchain
 	; Must be allocated block
 	push	dx
 	push	ax
@@ -1150,7 +1129,19 @@ stage_fat:
 	call	setbitsclustdi
 	pop	ax
 	pop	dx
-	;FIXME if less than current block, check if free and prompt otherwise
+	; if less than current block, check if free and prompt to repair
+	mov	cx, [bp - 6]
+	mov	bx, [bp - 4]
+	add	cx, di
+	adc	bx, 0
+	cmp	dx, bx
+	ja	.chkoverlarge
+	jb	.chkallocbefore
+	cmp	ax, cx
+	ja	.chkoverlarge
+	jb	.chkallocbefore
+	jmp	.queryfixxlink	; Block looped on itself
+.chkoverlarge:
 	cmp	dx, [highestclust + 2]
 	jb	.notoverlarge
 	ja	.overlarge
@@ -1167,15 +1158,99 @@ stage_fat:
 	pop	ax
 	je	.setendchain	 ; We are completely tolerant of not fixing this one
 	jmp	.clustdonenotfree
+.chkallocbefore:
+	push	ax
+	push	dx
+	call	getbitsclust
+	test	ch, 1
+	jnz	.notoverlargexvector
+	mov	cx, state_fat
+	mov	dx, query_freealloc
+	call	queryfixyn
+	cmp	al, 'y'
+.notoverlargexvector:
+	pop	dx
+	pop	ax
+	jne	.notoverlarge
+	push	ax
+	push	dx
+	mov	cl, 3
+	call	setbitsclust
+	pop	dx
+	pop	ax
+	cmp	ax, [bp - 6]
+	jne	.fixallocfarbefore
+	cmp	dx, [bp - 4]
+	jne	.fixallocfarbefore
+	push	di
+	mov	di, ax
+	sub	di, [bp - 6]
+	mov	dx, 0FFFh
+	mov	ah, 0FFh
+	mov	al, [descriptor]
+	call	entrytoblockall
+	pop	di
+	jmp	.notoverlarge
+.fixallocfarbefore:
+	; Load prior into buf4 and set end of chain
+	call	blockfromcluster
+	mov	es, [buf4seg]
+	add	ax, [reservedsects]
+	adc	dx, 0
+	xor	cx, cx
+.fixallocfarbeforeloop:
+	push	cx
+	push	ax
+	push	dx
+	push	di
+	call	diskread
+	pop	di
+	pop	dx
+	pop	ax
+	jc	.fixallocfarbeforeskip
+	push	ax
+	push	dx
+	mov	dx, 0FFFh
+	mov	ah, 0FFh
+	mov	al, [descriptor]
+	call	entrytoblock
+	pop	dx
+	pop	ax
+	push	ax
+	push	dx
+	push	di
+	mov	ch, 40h
+	call	diskwrite
+	pop	di
+	pop	dx
+	pop	ax
+.fixallocfarbeforeskip:
+	pop	cx
+	inc	cx
+	cmp	cl, [numfats]
+	jb	.fixallocfarbeforeloop
 .notoverlarge:
 	push	ax
 	push	dx
 	call	getbitsclust
 	pop	dx
 	pop	ax
-	test	cl, 1
+	test	ch, 1
 	jz	.firstallocfound
-	call	incxlinkcount
+.queryfixxlink:
+	mov	dx, query_xlink
+	mov	cx, stage_fat
+	call	queryfixyn
+	cmp	al, 'y'		; Repair is an exercise in optimism; this will permit copy all files out
+	jne	.nofixxlink	; Small chance of directory pass destroying both files
+	; The obvious xlink-repair algorithm breaks down in the case of a file xlinked with itself.
+	; I spent a long time trying to find an algorithm that worked. I found one, but it's ridiculous
+	; and I'm not doing it. Truncate one of the files here.
+	mov	dx, 0FFFh
+	mov	ah, 0FFh
+	mov	al, [descriptor]
+	call	entrytoblockall
+.nofixxlink:
 	jmp	.clustdonenotfree
 .firstallocfound:
 	mov	cl, 1
@@ -1189,9 +1264,32 @@ stage_fat:
 	cmp	di, [bp - 18]
 	jb	.notfirst
 
-	;TODO: writeback, prompting for bad sectors if necessary
+	; Reached the end of the block; write back
+	mov	ax, [bp - 6]
+	mov	dx, [bp - 4]
+	mov	cx, [bp - 16]
+	test	[bp - 1], byte 1
+	jz	.notfirstwriteback
+	mov	di, 0
+	mov	es, [buf1seg]
+	call	writebackfat
+.notfirstwriteback:
+	test	[numfats], byte 2
+	jb	.advanceblockloop
+	test	[bp - 1], byte 2
+	jz	.notsecondwriteback
+	mov	di, 1
+	mov	es, [buf2seg]
+	call	writebackfat
+.notsecondwriteback:
+	test	[numfats], byte 3
+	jb	.advanceblockloop
+	mov	di, 2
+	mov	es, [buf3seg]
+	call	writebackfat
 
 	;Advance loop
+.advanceblockloop:
 	mov	ax, [bp - 6]
 	mov	dx, [bp - 4]
 	add	ax, [bp - 18]
@@ -1335,6 +1433,66 @@ checkmark:
 	pop	ax
 	ret
 
+	; Input: DX:AX = cluster, DI = words per block
+	; Ouput: DX:AX = offset into first FAT, DI = offset into block
+	; Preserves SI, BP
+blockfromcluster:
+	push	ax
+	mov	ax, di
+	call	[entriesperblock]
+	xchg	ax, bx
+	xchg	ax, dx
+	xor	dx, dx
+	div	bx
+	xchg	ax, cx
+	pop	ax
+	div	bx		; CX:AX = block number
+	mov	bx, [sectsperchunk]
+	mov	di, dx		; DI = offset into block
+	mul	bx
+	push	ax
+	xchg	ax, cx
+	mov	cx, dx
+	mul	bx
+	mov	dx, cx
+	add	dx, ax
+	pop	ax
+	add	ax, [reservedsects]
+	adc	dx, 0
+	ret
+
+	; Writes a FAT block back to disk
+	; DX:AX = offset as cluster no, CX = entries per block, ES = buffer
+	; Preserves AX, CX, DX, destroys BX, SI, DI
+writebackfat:
+	push	ax
+	push	dx
+	push	cx
+	call	[getblockaddr]
+	cmp	[fattype], byte 12
+	jne	.loop
+	push	word [sectsperchunk]		; FAT 12 must process the whole at once
+	mov	bx, [sectsperfat]
+	mov	[sectsperchunk], bx
+.loop	cmp	di, 0
+	je	.nom
+	add	ax, [sectsperfat]
+	adc	dx, [sectsperfat + 2]
+	dec	di
+	jmp	.loop
+.nom	add	ax, [reservedsects]
+	adc	dx, 0
+	mov	ch, 40h
+	xor	bx, bx
+	call	diskwrite	; Doesn't return on failure so no pushf needed
+	cmp	[fattype], byte 12
+	jne	.nopopx
+	pop	word [sectsperchunk]
+.nopopx pop	cx
+	pop	bx
+	pop	ax
+	ret
+
 	; Entry point; DX:AX = base cluster no, DI = offset
 	; Result in CH; destroys everything but DI and ES
 getbitsclustdi:
@@ -1452,7 +1610,7 @@ fat_quantify:
 	mov	ax, [bp - 18]
 	push	bp
 	mov	bp, sp
-	sub	sp, 12
+	sub	sp, 10
 	mov	[bp - 2], ax		; Entries per block
 
 	;Shell sort
@@ -1539,14 +1697,21 @@ fat_quantify:
 	pop	bx
 	ret
 
-incxlinkcount:
-	add	[xlinkcount], word 1
-	adc	[xlinkcount + 2], word 0
-	ret
-
-decxlinkcount:
-	sub	[xlinkcount], word 1
-	sbb	[xlinkcount + 2], word 0
+entrytoblockall:
+	push	es
+	xor	cx, cx
+.loop	push	cx
+	mov	bx, cx
+	add	bx, cx
+	add	bx, buf1seg
+	mov	es, [bx]
+	call	[entrytoblock]
+	pop	cx
+	inc	cx
+	cmp	cl, [numfats]
+	jb	.loop
+	pop	es
+	mov	[bp - 1], byte 7	; All same, ergo all changed
 	ret
 
 ; FAT12 has entries that span sectors but we don't play that game; we loaded the whole FAT in that case
@@ -1572,6 +1737,7 @@ entrytoblock12:
 	shl	ax, cl
 	and	[es:bx], byte 0Fh
 	or	[es:bx], ax
+	shr	ax, cl			; effective bits of AX are preserved
 	ret
 
 calcoffset12:
@@ -1580,6 +1746,15 @@ calcoffset12:
 	add	bx, di
 	shr	bx, 1
 	ret
+
+entriestowords12:
+	shl	ax, 1
+	mov	di, 3
+	div	di
+	or	dx, dx
+	jz	.ret
+	inc	ax
+.ret	ret
 
 entriesperblock12:
 	mov	ax, [highestclust]
@@ -1616,6 +1791,7 @@ entrytoblock16:
 	add	bx, di
 	mov	[es:bx], ax
 entriesperblock16:
+entriestowords16:
 	ret
 
 getblockaddr16:
@@ -1652,6 +1828,10 @@ entrytoblock32:
 	shl	bx, 1
 	mov	[es:bx], ax
 	mov	[es:bx + 2], dx
+	ret
+
+entriestowords32:
+	shl	ax, 1
 	ret
 
 entriesperblock32:
@@ -1764,7 +1944,7 @@ diskreadwrite:
 	mov	[cs:preserve_sp], sp
 	add	sp, 2
 	test	[bp - 4], byte 1
-	;jnz	.write
+	jnz	.write
 	int	25h
 	mov	sp, [cs:preserve_sp]	; DR-DOS bugfix, must immediately follow int instruction
 	jmp	.cont
@@ -1804,6 +1984,7 @@ shelltabs_end:
 
 fptrcnt	equ	8
 fptrs12:
+	dw	entriestowords12
 	dw	entryfromblock12
 	dw	entrytoblock12
 	dw	entriesperblock12
@@ -1813,6 +1994,7 @@ fptrs12:
 	dw	ismdesc12
 
 fptrs16:
+	dw	entriestowords16
 	dw	entryfromblock16
 	dw	entrytoblock16
 	dw	entriesperblock16
@@ -1822,6 +2004,7 @@ fptrs16:
 	dw	ismdesc16
 
 fptrs32:
+	dw	entriestowords32
 	dw	entryfromblock32
 	dw	entrytoblock32
 	dw	entriesperblock32
@@ -1838,9 +2021,10 @@ msg_usage	db	'Usage: SSDSCAN DRIVE: [/F] [/C] [/D]', 13, 10
 msg_nocmem	db	'Insufficient Conventional Memory available to check any disk.', 13, 10, '$'
 msg_nocmem2	db	'Insufficient Conventional Memory available to check this disk.', 13, 10, '$'
 state_mediaq	db	13, 10
-state_media	db	'Media Descriptor     : $'
+state_media	db	        'Media Descriptor     : $'
 state_fat	db	13, 10, 'File Allocation Table: $'
 state_dir	db	13, 10, 'Directory Structure  : $'
+state_rec	db	13, 10, 'Recovering Lost Files: $'
 out_cr		db	13, '$'
 out_check	db	251, "  $"
 dsc_bps		db	13,     'Bytes per sector           : '
@@ -1861,11 +2045,12 @@ msg_noboot	db	'Failed to find a valid boot sector', 13, 10, '$'
 msg_badmdesc	db	'Encountered a bad sector trying to read media descriptor.', 13, 10
 msg_nomdesc	db	"Media Descriptor does not correspond to boot sector.", 13, 10, "Most likely this isn't a FAT filesystem after all.", 13, 10, '$'
 query_bootsect	db	"Boot sector damaged, however a backup boot sector was found. Restore it?$"
-query_fatdiff	db	"FATs disagree, repair?$"
+query_fatdiff	db	"FATs disagree, repair with best guess?$"
 query_anomalous	db	"Anomalous record in FAT, repair?$"
 query_clustone	db	"Encountered mid-allocation cluster value, repair?$"
 query_freealloc	db	"Encountered free block in use, allocate?$"
 query_clustout	db	"Encountered out-of-range cluster value, repair?$"
+query_xlink	db	"Encountered cross-linked cluster, repair?$"
 msg_nogoodfat	db	"Correlated bad sectors destroyed FAT.", 13, 10, '$'
 msg_rootdirlost	db	"Root directory lost", 13, 10, '$'
 msg_replacer	db	"New bad sector encountered reading SSD; advise immediate replacement", 13, 10, '$'
@@ -1892,14 +2077,14 @@ bitvectorptrs	resb	8 * 128
 		; 2 = base address descriptor
 		; 4 = length
 
-entryfromblock	resb	2		; Function pointers
+entriestowords	resb	2		; Function pointers
+entryfromblock	resb	2
 entrytoblock	resb	2
 entriesperblock	resb	2		; on call, AX = number of words in block
 getblockaddr	resb	2		; on call, CX = number of entries in block
 isendchain	resb	2
 isbadblock	resb	2
 ismdesc		resb	2
-		resb	2
 
 cmem		resb	2		; Number of usable paragraphs of conventional memory in our memory block beyond the stack
 opflags		resb	2
@@ -1925,7 +2110,7 @@ firstclustsect	resb	4
 
 zerothclustsect	resb	4
 highestclust	resb	4
-xlinkcount	resb	4
+		resb	4
 		resb	4
 
 rootdirsects	resb	4
