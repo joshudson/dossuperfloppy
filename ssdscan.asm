@@ -561,7 +561,7 @@ initpools:
 	push	ds
 	pop	es
 	mov	cx, fptrcnt
-	mov	di, entryfromblock
+	mov	di, entriestowords
 	cmp	[fattype], byte 16
 	je	.is16
 	cmp	[fattype], byte 32
@@ -895,10 +895,11 @@ stage_fat:
 	cmp	dx, cx
 	jb	.loop_top_common_short
 	cmp	ax, bx
-	jae	.loop_top_common_short
+	jbe	.loop_top_common_fullsize
+.loop_top_common_short:
 	mov	ax, bx
 	mov	dx, cx
-.loop_top_common_short:
+.loop_top_common_fullsize:
 	mov	[bp - 14], ax
 	mov	[bp - 12], dx
 	sub	ax, [bp - 6]
@@ -958,10 +959,11 @@ stage_fat:
 	push	es
 	mov	es, [bp - 20]
 	call	fat_quantify
+	mov	[bp - 22], ax
 	pop	es
 .quantify_have:
 	call	fat_quantify
-	cmp	ax, [bp - 20]
+	cmp	ax, [bp - 22]
 	jbe	.quantify_worse
 .quantify_free:
 	mov	[bp - 20], es
@@ -1238,6 +1240,12 @@ stage_fat:
 	test	ch, 1
 	jz	.firstallocfound
 .queryfixxlink:
+	;DEBUG: 3 really shouldn't be xlinked.
+	;DEBUG: after we pass throught this entry something trashes console
+	;DEBUG: second copy of FAT is being trashed with 0C where there should be a 04
+	mov	ax, di
+	call	outax
+	call	newline
 	mov	dx, query_xlink
 	mov	cx, stage_fat
 	call	queryfixyn
@@ -1265,6 +1273,9 @@ stage_fat:
 	jb	.notfirst
 
 	; Reached the end of the block; write back
+	mov	ax, [bp - 16]
+	call	outax
+	call	newline
 	mov	ax, [bp - 6]
 	mov	dx, [bp - 4]
 	mov	cx, [bp - 16]
@@ -1274,7 +1285,7 @@ stage_fat:
 	mov	es, [buf1seg]
 	call	writebackfat
 .notfirstwriteback:
-	test	[numfats], byte 2
+	cmp	[numfats], byte 2
 	jb	.advanceblockloop
 	test	[bp - 1], byte 2
 	jz	.notsecondwriteback
@@ -1282,7 +1293,7 @@ stage_fat:
 	mov	es, [buf2seg]
 	call	writebackfat
 .notsecondwriteback:
-	test	[numfats], byte 3
+	cmp	[numfats], byte 3
 	jb	.advanceblockloop
 	mov	di, 2
 	mov	es, [buf3seg]
@@ -1433,6 +1444,16 @@ checkmark:
 	pop	ax
 	ret
 
+newline:
+	push	ax
+	push	dx
+	mov	dx, out_newline
+	mov	ah, 9
+	int	21h
+	pop	dx
+	pop	ax
+	ret
+
 	; Input: DX:AX = cluster, DI = words per block
 	; Ouput: DX:AX = offset into first FAT, DI = offset into block
 	; Preserves SI, BP
@@ -1489,7 +1510,7 @@ writebackfat:
 	jne	.nopopx
 	pop	word [sectsperchunk]
 .nopopx pop	cx
-	pop	bx
+	pop	dx
 	pop	ax
 	ret
 
@@ -2017,7 +2038,8 @@ fptrs32:
 msg_usage	db	'Usage: SSDSCAN DRIVE: [/F] [/C] [/D]', 13, 10
 		db	'/F   Fix errors without prompting', 13, 10
 		db	'/C   Check chain length against file length', 13, 10, '$'
-		db	'/D   Describe filesystem', 13, 10, '$'
+		db	'/D   Describe filesystem'
+out_newline	db	13, 10, '$'
 msg_nocmem	db	'Insufficient Conventional Memory available to check any disk.', 13, 10, '$'
 msg_nocmem2	db	'Insufficient Conventional Memory available to check this disk.', 13, 10, '$'
 state_mediaq	db	13, 10
