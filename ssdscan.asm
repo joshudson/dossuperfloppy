@@ -607,7 +607,7 @@ initpools:
 	cmp	ax, 32
 	jae	.left3
 	mov	ax, 32
-.left3	add	cx, 32		; BUF4 must be at least 512 bytes for recursive dirwalk
+.left3	add	cx, ax		; BUF4 must be at least 512 bytes for recursive dirwalk
 	mov	[bitbufseg], cx
 	; Check if the entire bitmap fits in cmem or not
 	mov	ax, [highestclust]		; Wasting two bits is worth it in instructions saved
@@ -620,14 +620,12 @@ initpools:
 	mov	si, bitvectorptrs
 	or	dx, dx
 	jnz	.cbigr
-	mov	dx, ds
-	add	dx, [cmem]
-	sub	dx, ax
+	mov	di, ds
+	add	di, [cmem]
+	sub	di, ax
 	jb	.cbigr
-	mov	[cmempoollen], dx	; Remember rest of conventional memory (in case something needs it)
+	mov	[cmempoollen], di	; Remember rest of conventional memory (in case something needs it)
 	mov	dx, [bitbufseg]		; Pool fits in conventional memory, bitbufseg unneeded
-	mov	[bitvectorptrs], byte b_mem_internal
-	mov	[bitvectorptrs + 2], dx
 	add	dx, ax
 	mov	[cmempool], dx
 	xor	dx, dx
@@ -635,16 +633,16 @@ initpools:
 	mov	bl, b_mem_internal
 	call	.mcrec			; Record single entry for all memory
 	jmp	.hmem
-.mcrec	push	cx
+.mcrec	push	cx			; BL = type, CX = pointer, DX:AX = how many paragraphs
 	mov	cx, 6
 .mcmm	shl	ax, 1
-	rcl	ax, 1
+	rcl	dx, 1
 	loop	.mcmm
 	pop	cx
-	mov	[si], bl
-	mov	[si + 2], cx
-	mov	[si + 4], ax
-	mov	[si + 6], dx
+	mov	[si + bitvectortype], bl
+	mov	[si + bitvectorptr], cx
+	mov	[si + bitvectorlength], ax
+	mov	[si + bitvectorlength + 2], dx
 	ret
 .cbigr	mov	cx, [bitbufseg]
 	add	cx, bx		; BX preserved the entire time: size of bitbufseg required
@@ -675,7 +673,7 @@ initpools:
 .hmem:
 	; Zero memory map
 	mov	si, bitvectorptrs
-.lfatl	mov	al, [si]
+.lfatl	mov	al, [si + bitvectortype]
 	cmp	al, byte 0
 	je	.lfat0
 	cmp	al, byte b_mem_xms
@@ -725,22 +723,23 @@ initpools:
 	test	ax, ax
 	jnz	.cfbcl
 	jmp	.lfatn
-.h0seg	mov	es, [si + 2]
-	mov	ax, [si + 4]
-	mov	dx, [si + 6]
+.h0seg	mov	es, [si + bitvectorptr]
+	mov	ax, [si + bitvectorlength]
+	mov	dx, [si + bitvectorlength + 2]
 	shr	dx, 1
 	rcr	ax, 1
 	adc	ax, 0
 	shr	dx, 1
 	rcr	ax, 1
 	adc	ax, 0
+	;DX:AX = number of bytes owned
 	shr	ax, 1
 	adc	ax, 0
 	push	ax
-	xor	ax, ax
 	or	dx, dx
 	jz	.h0snl
 .h0sl	mov	cx, 32768
+	xor	ax, ax
 	xor	di, di
 	rep	stosw
 	mov	ax, es
@@ -749,6 +748,7 @@ initpools:
 	dec	dx
 	jnz	.h0sl
 .h0snl	pop	cx
+	xor	ax, ax
 	xor	di, di
 	rep	stosw
 .lfatn	add	si, 8
@@ -859,18 +859,24 @@ stage_fat:
 	;bp - 1: dirty flags for each FAT
 	;bp - 2: bad block flags for each FAT
 	;bp - 6: lowest cluster number in FAT block
-	;bp - 10: (free dword; maybe use later)
+	;bp - 10: number of entries in a full FAT block
 	;bp - 14: one more than last cluster number in FAT block
 	;bp - 16: number of words in a FAT block
 	;bp - 18: number of entries in a FAT block
 	;bp - 20: best FAT so far
 	;bp - 22: quality of best FAT so far
 	xor	dx, dx
+	mov	[bp - 10], ax
 	mov	[bp - 2], ax
 	mov	[bp - 4], dx
 	mov	[bp - 6], dx
 	mov	[bp - 8], dx
-	mov	[bp - 10], dx
+	mov	ax, [bytespersector]
+	mul	word [sectsperchunk]	; A chunk can't be bigger than 32KB so DX is always 0
+	call	[entriestowords]
+	call	[entriesperblock]
+	mov	[bp - 10], ax
+	mov	es, [bitbufseg]
 
 .fat_block_loop:
 	;FAT blocks are loaded; prepare current counter
@@ -935,6 +941,7 @@ stage_fat:
 .ncpy31	pop	ds
 	jmp	.quantify_apply_finished
 
+	;DEBUG: subsequent scans report faulty mismatch
 .quantify_loop:
 	mov	ch, 0
 	shl	ch, cl
@@ -1061,7 +1068,7 @@ stage_fat:
 	cmp	al, 0FFh
 	jne	.secondfix
 	call	[ismdesc]
-	jne	.secondfinish
+	je	.secondfinish
 .secondfix:
 	mov	cx, state_fat
 	mov	dx, query_anomalous
@@ -1231,8 +1238,8 @@ stage_fat:
 	inc	cx
 	cmp	cl, [numfats]
 	jb	.fixallocfarbeforeloop
-.notoverlarge:
-	push	ax
+.notoverlarge:		; Technically the label is correct, the entry is not over the maximum size
+	push	ax	; However it is also not referring to a known-free cluster
 	push	dx
 	call	getbitsclust
 	pop	dx
@@ -1240,14 +1247,11 @@ stage_fat:
 	test	ch, 1
 	jz	.firstallocfound
 .queryfixxlink:
-	;DEBUG: 3 really shouldn't be xlinked.
-	;DEBUG: after we pass throught this entry something trashes console
-	;DEBUG: second copy of FAT is being trashed with 0C where there should be a 04
 	mov	ax, di
 	call	outax
 	call	newline
 	mov	dx, query_xlink
-	mov	cx, stage_fat
+	mov	cx, state_fat
 	call	queryfixyn
 	cmp	al, 'y'		; Repair is an exercise in optimism; this will permit copy all files out
 	jne	.nofixxlink	; Small chance of directory pass destroying both files
@@ -1278,7 +1282,7 @@ stage_fat:
 	call	newline
 	mov	ax, [bp - 6]
 	mov	dx, [bp - 4]
-	mov	cx, [bp - 16]
+	mov	cx, [bp - 10]
 	test	[bp - 1], byte 1
 	jz	.notfirstwriteback
 	mov	di, 0
@@ -1316,8 +1320,11 @@ stage_fat:
 	; TODO percentage
 
 	;Read in sectors for next loop
-	mov	cx, [bp - 16]
+	call	outax
+	mov	cx, [bp - 10]
 	call	[getblockaddr]
+	call	outax
+	call	newline
 	xor	cx, cx
 	mov	[bp - 2], cx
 	add	ax, [reservedsects]
@@ -1330,7 +1337,10 @@ stage_fat:
 	shl	bx, 1
 	mov	es, [buf1seg + bx]
 	xor	bx, bx
+	call	outax
 	call	diskread
+	mov	ax, [es:0]
+	call	outax
 	pop	cx
 	pop	dx
 	pop	ax
@@ -1344,6 +1354,7 @@ stage_fat:
 	inc	cl
 	cmp	cl, [numfats]
 	jb	.loopmorefats
+	call	newline
 	jmp	.loop_top_not12		; Looks like it wants to jump to .fat_block_loop but we already know it's not FAT12
 .exitloop:
 	mov	sp, bp
@@ -1561,19 +1572,19 @@ clearbitsclust:
 
 bitsclustcommon:
 	mov	si, bitvectorptrs
-.loop	cmp	[si + 6], dx
+.loop	cmp	[si + bitvectorlength + 2], dx
 	ja	.this
 	jb	.next
-	cmp	[si + 4], ax
+	cmp	[si + bitvectorlength], ax
 	jae	.this
-.next	sub	ax, [si + 4]
-	sbb	dx, [si + 6]
+.next	sub	ax, [si + bitvectorlength]
+	sbb	dx, [si + bitvectorlength + 2]
 	add	si, 8
 	jmp	.loop
-.this	cmp	[si], byte b_mem_xms
+.this	cmp	[si + bitvectortype], byte b_mem_xms
 	je	.xms
 	ja	.fault
-	mov	es, [si + 2]	; It's addressible memory
+	mov	es, [si + bitvectorptr]	; It's addressible memory
 	mov	cl, al
 	and	cl, 3
 	shl	cl, 1
@@ -1629,6 +1640,7 @@ fat_quantify:
 	push	si
 	push	di
 	mov	ax, [bp - 18]
+	call	outax
 	push	bp
 	mov	bp, sp
 	sub	sp, 10
@@ -1815,9 +1827,9 @@ entriesperblock16:
 entriestowords16:
 	ret
 
-getblockaddr16:
+getblockaddr16:		; the difference between this function between F16 and F32 is 16/16 vs 32/16
 	div	cx
-	xor	dx, dx
+	mul	word [sectsperchunk]
 	ret
 
 isendchain16:
@@ -1860,14 +1872,20 @@ entriesperblock32:
 	ret
 
 getblockaddr32:
-	shl	cx, 1
 	xchg	ax, bx
 	xchg	ax, dx
 	xor	dx, dx
 	div	cx
 	xchg	ax, bx
 	div	cx
-	mov	dx, bx
+	mul	word [sectsperchunk]
+	push	ax
+	xchg	ax, bx
+	mov	bx, dx
+	mul	word [sectsperchunk]
+	xchg	ax, dx
+	add	dx, bx
+	pop	ax
 	ret
 
 isendchain32:
@@ -2093,17 +2111,13 @@ xms_xfer_srcoff	resb	4
 xms_xfer_dst	resb	2
 xms_xfer_dstoff	resb	4
 
-bitvectorptrs	resb	8 * 128
-		; 0 = kind
-		; 1 = control flag
-		; 2 = base address descriptor
-		; 4 = length
+bitvectorptrs	resb	8 * 128		; Use bitvector* constants as index offsets
 
 entriestowords	resb	2		; Function pointers
 entryfromblock	resb	2
 entrytoblock	resb	2
 entriesperblock	resb	2		; on call, AX = number of words in block
-getblockaddr	resb	2		; on call, CX = number of entries in block
+getblockaddr	resb	2		; on call, CX = number of entries in full block
 isendchain	resb	2
 isbadblock	resb	2
 ismdesc		resb	2
@@ -2152,7 +2166,7 @@ bitmasklen	resb	2
 
 _endbss:
 
-bitvectoroffset	equ	0
+bitvectorlength	equ	0
 bitvectorptr	equ	4
 bitvectortype	equ	6
 
