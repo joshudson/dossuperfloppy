@@ -154,15 +154,13 @@ stage_media_descriptor:
 	mov	[es:4096], byte 0A0h
 	mov	[es:8192], byte 0A0h
 	mov	[es:16384], byte 0A0h
-	xor	bx, bx
 	xor	dx, dx
 	xor	cx, cx
-	call	diskread
+	call	diskread0
 	jnc	.read0
-.error0	xor	bx, bx
-	xor	dx, dx
+.error0	xor	dx, dx
 	xor	cx, cx
-	call	diskread
+	call	diskread0
 	jnc	.read0
 	call	outax
 .errorZ	mov	dx, msg_error0
@@ -186,11 +184,10 @@ stage_media_descriptor:
 	mov	[es:4096], byte 0
 	mov	[es:8192], byte 0
 	mov	[es:16384], byte 0
-	xor	bx, bx
 	xor	dx, dx
 	xor	cx, cx
 	xor	ax, ax
-	call	diskread
+	call	diskread0
 	jc	.errorZ
 	mov	bx, 16384
 .sz2	cmp	[es:bx], byte 0
@@ -209,13 +206,12 @@ stage_media_descriptor:
 
 	xor	ax, ax
 .mloop	push	ax
-	xor	bx, bx
 	xor	dx, dx
 	xor	cx, cx
 	mov	es, [buf1seg]
 	cmp	ax, 0
 	je	.rda			; Already read in sector 0 (CF clear if this jump is taken)
-	call	diskread
+	call	diskread0
 .rda	pop	dx
 	jc	.notbpb			; bad sector looking for backup sector - ignore it
 	mov	es, [buf1seg]
@@ -243,7 +239,6 @@ stage_media_descriptor:
 	jg	.notbpb
 	cmp	[es:15h], byte 0E0h	; Media Descriptor itself
 	jnb	.bpb
-	;jmp	.bpb
 .notbpb	mov	ax, dx
 	inc	ax
 	cmp	ax, 97			; Worst case for FAT32 backup boot sector
@@ -772,9 +767,8 @@ initpools:
 	push	di
 	push	dx
 	push	ax
-	xor	bx, bx
 	mov	es, [buf1seg + si]
-	call	diskread
+	call	diskread0
 	pop	ax
 	pop	dx
 	pop	di
@@ -831,19 +825,16 @@ initpools:
 	jne	.mddone
 	xchg	ax, dx
 	xor	dx, dx
-	xor	bx, bx
 	mov	es, [buf1seg]
-	call	diskread
+	call	diskread0
 	jc	.nbvec
 	xor	ax, ax
 	xor	dx, dx
-	xor	bx, bx
 	mov	ch, 0
-	call	diskwrite
+	call	diskwrite0
 	xor	dx, dx			; Repair boot sector clobbered buf1; reload
 	mov	ax, [reservedsects]
-	xor	bx, bx
-	call	diskread
+	call	diskread0
 	jnc	.mddone
 	or	bp, 1
 .mddone	call	checkmark
@@ -866,14 +857,13 @@ stage_fat:
 	;bp - 20: best FAT so far
 	;bp - 22: quality of best FAT so far
 	xor	dx, dx
-	mov	[bp - 10], ax
 	mov	[bp - 2], ax
 	mov	[bp - 4], dx
 	mov	[bp - 6], dx
 	mov	[bp - 8], dx
 	mov	ax, [bytespersector]
 	mul	word [sectsperchunk]	; A chunk can't be bigger than 32KB so DX is always 0
-	call	[entriestowords]
+	shr	ax, 1
 	call	[entriesperblock]
 	mov	[bp - 10], ax
 	mov	es, [bitbufseg]
@@ -1134,6 +1124,8 @@ stage_fat:
 	; Must be allocated block
 	push	dx
 	push	ax
+	mov	ax, [bp - 6]
+	mov	dx, [bp - 4]
 	mov	cl, 2
 	call	setbitsclustdi
 	pop	ax
@@ -1171,7 +1163,7 @@ stage_fat:
 	push	ax
 	push	dx
 	call	getbitsclust
-	test	ch, 1
+	test	ch, 2
 	jnz	.notoverlargexvector
 	mov	cx, state_fat
 	mov	dx, query_freealloc
@@ -1181,12 +1173,12 @@ stage_fat:
 	pop	dx
 	pop	ax
 	jne	.notoverlarge
-	push	ax
 	push	dx
-	mov	cl, 3
+	push	ax
+	mov	cl, 2
 	call	setbitsclust
-	pop	dx
 	pop	ax
+	pop	dx
 	cmp	ax, [bp - 6]
 	jne	.fixallocfarbefore
 	cmp	dx, [bp - 4]
@@ -1201,43 +1193,47 @@ stage_fat:
 	pop	di
 	jmp	.notoverlarge
 .fixallocfarbefore:
+	push	es
+	push	di
+	push	ax	; Preserve actual cluster # to mark it used
+	push	dx
 	; Load prior into buf4 and set end of chain
 	call	blockfromcluster
 	mov	es, [buf4seg]
-	add	ax, [reservedsects]
-	adc	dx, 0
 	xor	cx, cx
 .fixallocfarbeforeloop:
 	push	cx
 	push	ax
 	push	dx
 	push	di
-	call	diskread
-	pop	di
-	pop	dx
-	pop	ax
+	call	diskread0
 	jc	.fixallocfarbeforeskip
-	push	ax
-	push	dx
+	pop	di
 	mov	dx, 0FFFh
 	mov	ah, 0FFh
 	mov	al, [descriptor]
-	call	entrytoblock
+	call	[entrytoblock]
 	pop	dx
 	pop	ax
 	push	ax
 	push	dx
 	push	di
 	mov	ch, 40h
-	call	diskwrite
+	call	diskwrite0
+.fixallocfarbeforeskip:
 	pop	di
 	pop	dx
 	pop	ax
-.fixallocfarbeforeskip:
 	pop	cx
+	add	ax, [sectsperfat]
+	adc	dx, [sectsperfat + 2]
 	inc	cx
 	cmp	cl, [numfats]
 	jb	.fixallocfarbeforeloop
+	pop	dx
+	pop	ax
+	pop	di
+	pop	es
 .notoverlarge:		; Technically the label is correct, the entry is not over the maximum size
 	push	ax	; However it is also not referring to a known-free cluster
 	push	dx
@@ -1247,9 +1243,6 @@ stage_fat:
 	test	ch, 1
 	jz	.firstallocfound
 .queryfixxlink:
-	mov	ax, di
-	call	outax
-	call	newline
 	mov	dx, query_xlink
 	mov	cx, state_fat
 	call	queryfixyn
@@ -1278,8 +1271,6 @@ stage_fat:
 
 	; Reached the end of the block; write back
 	mov	ax, [bp - 16]
-	call	outax
-	call	newline
 	mov	ax, [bp - 6]
 	mov	dx, [bp - 4]
 	mov	cx, [bp - 10]
@@ -1313,22 +1304,19 @@ stage_fat:
 	cmp	dx, [highestclust + 2]
 	jb	.loopmore
 	cmp	ax, [highestclust]
-	ja	.exitloop
+	jae	.exitloop
 .loopmore:
 	mov	[bp - 6], ax
 	mov	[bp - 4], dx
 	; TODO percentage
 
 	;Read in sectors for next loop
-	call	outax
 	mov	cx, [bp - 10]
 	call	[getblockaddr]
-	call	outax
-	call	newline
 	xor	cx, cx
 	mov	[bp - 2], cx
 	add	ax, [reservedsects]
-	adc	dx, [reservedsects + 2]
+	adc	dx, 0
 .loopmorefats:
 	push	ax
 	push	dx
@@ -1336,11 +1324,7 @@ stage_fat:
 	mov	bx, cx
 	shl	bx, 1
 	mov	es, [buf1seg + bx]
-	xor	bx, bx
-	call	outax
-	call	diskread
-	mov	ax, [es:0]
-	call	outax
+	call	diskread0
 	pop	cx
 	pop	dx
 	pop	ax
@@ -1354,7 +1338,6 @@ stage_fat:
 	inc	cl
 	cmp	cl, [numfats]
 	jb	.loopmorefats
-	call	newline
 	jmp	.loop_top_not12		; Looks like it wants to jump to .fat_block_loop but we already know it's not FAT12
 .exitloop:
 	mov	sp, bp
@@ -1465,6 +1448,32 @@ newline:
 	pop	ax
 	ret
 
+;DEBUG: out line
+%ifdef NOTDEF
+outesline:
+	push	ax
+	push	cx
+	mov	ax, [es:0]
+	call	outax
+	mov	ax, [es:2]
+	call	outax
+	mov	ax, [es:4]
+	call	outax
+	mov	ax, [es:6]
+	call	outax
+	mov	ax, [es:8]
+	call	outax
+	mov	ax, [es:10]
+	call	outax
+	mov	ax, [es:12]
+	call	outax
+	mov	ax, [es:14]
+	call	outax
+	pop	cx
+	pop	ax
+	ret
+%endif
+
 	; Input: DX:AX = cluster, DI = words per block
 	; Ouput: DX:AX = offset into first FAT, DI = offset into block
 	; Preserves SI, BP
@@ -1472,11 +1481,11 @@ blockfromcluster:
 	push	ax
 	mov	ax, di
 	call	[entriesperblock]
-	xchg	ax, bx
-	xchg	ax, dx
+	xchg	ax, bx		; mov bx, ax
+	xchg	ax, dx		; mov ax, dx
 	xor	dx, dx
 	div	bx
-	xchg	ax, cx
+	xchg	ax, cx		; mov cx, ax
 	pop	ax
 	div	bx		; CX:AX = block number
 	mov	bx, [sectsperchunk]
@@ -1515,8 +1524,7 @@ writebackfat:
 .nom	add	ax, [reservedsects]
 	adc	dx, 0
 	mov	ch, 40h
-	xor	bx, bx
-	call	diskwrite	; Doesn't return on failure so no pushf needed
+	call	diskwrite0	; Doesn't return on failure so no pushf needed
 	cmp	[fattype], byte 12
 	jne	.nopopx
 	pop	word [sectsperchunk]
@@ -1640,7 +1648,6 @@ fat_quantify:
 	push	si
 	push	di
 	mov	ax, [bp - 18]
-	call	outax
 	push	bp
 	mov	bp, sp
 	sub	sp, 10
@@ -1804,9 +1811,7 @@ isendchain12:
 
 isbadblock12:
 	cmp	ax, 0FF7h
-	je	.ret
-	cmp	ax, 0FF8h
-.ret	ret
+	ret
 
 ismdesc12:
 	cmp	ah, 00Fh
@@ -1838,9 +1843,7 @@ isendchain16:
 
 isbadblock16:
 	cmp	ax, 0FFF7h
-	je	.ret
-	cmp	ax, 0FFF8h
-.ret	ret
+	ret
 
 ismdesc16:
 	cmp	ah, 0FFh
@@ -1905,6 +1908,8 @@ ismdesc32:
 .ret	ret
 	
 
+diskwrite0:
+	xor	bx, bx
 diskwrite:
 	mov	cl, 1
 	call	diskreadwrite
@@ -1916,6 +1921,8 @@ diskwrite:
 	mov	al, 3	; TODO error normalization
 	jmp	exit
 
+diskread0:
+	xor	bx, bx
 diskread:
 	xor	cx, cx
 
