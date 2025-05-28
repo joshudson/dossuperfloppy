@@ -476,6 +476,10 @@ stage_media_descriptor:
 	shl	bx, 1
 	jmp	.spcn
 .spcf	mov	[sectsperchunk], bx
+	mov	ax, [bytespersector]
+	mul	bx			; Cannot ovrflow
+	shr	ax, 1
+	mov	[wordsperchunk], ax
 
 	xor	dx, dx			; Find offset to first cluster
 	xor	ax, ax
@@ -579,10 +583,9 @@ initpools:
 .is32	mov	si, fptrs32
 	rep	movsw
 	mov	ch, 16			; FAT32: every 16 bytes of FAT is 1 byte of bitmap
-.in12	mov	ax, [sectsperchunk]
-	mul	word [bytespersector]	; Cannot overflow
-	mov	cl, 4
-	shr	ax, cl
+.in12	mov	ax, [wordsperchunk]
+	mov	cl, 3
+	shr	ax, cl			; ax = paragraphs per chunk
 	mov	bx, ax			; bx = ceil(bx / ch)
 .dec	shr	bx, 1
 	adc	bx, 0
@@ -861,9 +864,7 @@ stage_fat:
 	mov	[bp - 4], dx
 	mov	[bp - 6], dx
 	mov	[bp - 8], dx
-	mov	ax, [bytespersector]
-	mul	word [sectsperchunk]	; A chunk can't be bigger than 32KB so DX is always 0
-	shr	ax, 1
+	mov	ax, [wordsperchunk]
 	call	[entriesperblock]
 	mov	[bp - 10], ax
 	mov	es, [bitbufseg]
@@ -1194,45 +1195,13 @@ stage_fat:
 	jmp	.notoverlarge
 .fixallocfarbefore:
 	push	es
-	push	di
-	push	ax	; Preserve actual cluster # to mark it used
-	push	dx
-	; Load prior into buf4 and set end of chain
-	call	blockfromcluster
-	mov	es, [buf4seg]
-	xor	cx, cx
-.fixallocfarbeforeloop:
-	push	cx
-	push	ax
-	push	dx
-	push	di
-	call	diskread0
-	jc	.fixallocfarbeforeskip
-	pop	di
-	mov	dx, 0FFFh
-	mov	ah, 0FFh
-	mov	al, [descriptor]
-	call	[entrytoblock]
-	pop	dx
-	pop	ax
-	push	ax
-	push	dx
-	push	di
-	mov	ch, 40h
-	call	diskwrite0
-.fixallocfarbeforeskip:
-	pop	di
-	pop	dx
-	pop	ax
-	pop	cx
-	add	ax, [sectsperfat]
-	adc	dx, [sectsperfat + 2]
-	inc	cx
-	cmp	cl, [numfats]
-	jb	.fixallocfarbeforeloop
-	pop	dx
-	pop	ax
-	pop	di
+	mov	es, [buf4seg]	; Load prior into buf4 and set end of chain
+	mov	bx, 0FFFh
+	push	bx
+	mov	bh, 0FFh
+	mov	bl, [descriptor]
+	push	bx
+	call	setclusterinfats
 	pop	es
 .notoverlarge:		; Technically the label is correct, the entry is not over the maximum size
 	push	ax	; However it is also not referring to a known-free cluster
@@ -1474,12 +1443,54 @@ outesline:
 	ret
 %endif
 
-	; Input: DX:AX = cluster, DI = words per block
+	; Arguments: ES=buffer, DX:AX = cluster to set, SP+2:SP+4 = value to set it to
+	; pops argument from stack, destroys BX, CX, SI
+setclusterinfats:
+	push	bp
+	mov	bp, sp
+	push	ax	; Preserve actual cluster # for caller
+	push	dx
+	push	di
+	call	blockfromcluster
+	xor	cx, cx
+.loop	push	cx
+	push	ax
+	push	dx
+	push	di
+	call	diskread0
+	jc	.skip
+	pop	di
+	mov	ax, [bp + 6]
+	mov	dx, [bp + 4]
+	call	[entrytoblock]
+	pop	dx
+	pop	ax
+	push	ax
+	push	dx
+	push	di
+	mov	ch, 40h
+	call	diskwrite0
+.skip	pop	di
+	pop	dx
+	pop	ax
+	pop	cx
+	add	ax, [sectsperfat]
+	adc	dx, [sectsperfat + 2]
+	inc	cx
+	cmp	cl, [numfats]
+	jb	.loop
+	pop	di
+	pop	dx
+	pop	ax
+	pop	bp
+	ret	4
+
+	; Input: DX:AX = cluster
 	; Ouput: DX:AX = offset into first FAT, DI = offset into block
 	; Preserves SI, BP
 blockfromcluster:
 	push	ax
-	mov	ax, di
+	mov	ax, [wordsperchunk]
 	call	[entriesperblock]
 	xchg	ax, bx		; mov bx, ax
 	xchg	ax, dx		; mov ax, dx
@@ -2169,7 +2180,7 @@ xmsaddr		resb	4
 fatinbuf	resb	4
 fatinbitmask	resb	4
 bitmasklen	resb	2
-		resb	2
+wordsperchunk	resb	2
 
 _endbss:
 
