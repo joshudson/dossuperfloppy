@@ -120,18 +120,22 @@ _start:
 	je	.o2
 	cmp	al, 'D'
 	je	.o3
+	cmp	al, 'Z'
+	je	.o4
+	jmp	.b
 .o1	or	bl, opflag_f
 	jmp	.b
 .o2	or	bl, opflag_c
 	jmp	.b
 .o3	or	bl, opflag_d
 	jmp	.b
+.o4	or	bl, opflag_z
+	jmp	.b
 .arg	mov	dx, msg_usage
 	mov	ah, 9
 	int	21h
 	mov	ax, 4C01h	; FIXME normalize error codes
 	int	21h
-	db	0xCC
 .go	mov	[opflags], bx
 	mov	[disk], dl
 	;TODO disable ^C handler and IO error handler as these will permanently leak memory
@@ -1126,9 +1130,7 @@ stage_fat:
 	; Must be allocated block
 	push	dx
 	push	ax
-	mov	ax, [bp - 6]
 	mov	dx, [bp - 4]
-	mov	cl, 2
 	call	setbitsclustdi
 	pop	ax
 	pop	dx
@@ -1320,7 +1322,6 @@ stage_dirwalk:
 	int	21h
 	mov	ax, [rootclust]
 	mov	dx, [rootclust + 2]
-	xor	cx, cx
 	mov	si, [reservedsects]
 	mov	di, [reservedsecs + 2]
 	mov	bx, 1
@@ -1462,16 +1463,54 @@ outesline:
 	ret
 %endif
 
+invalidatenextcluster:
+	mov	cx, 0FFFFh
+	mov	[clustinbuffer], cx
+	mov	[clustinbuffer + 2], cx
+	ret
+	
+	;Given a cluster number, gets the next cluster number; that is, read fat cluster
+	;Input: DX:AX = cluster, ES=buffer     Output: DX:AX = next cluster
+	;Destroys BX, CX, DI
+getnextcluster:
+	push	si
+	mov	si, .worker
+	call	getsetcluster
+	pop	si
+	ret
+.worker xor	cx, cx
+	push	di
+.loop	push	cx
+	push	ax
+	push	dx
+	call	diskread0
+	pop	dx
+	pop	ax
+	pop	cx
+	jnc	.found
+	inc	cl
+	cmp	cl, [numfats]
+	jb	.loop
+	jmp	newbadsector	; Oof
+.found	pop	di
+	jmp	[entryfromblock]
+
 	; Arguments: ES=buffer, DX:AX = cluster to set, SP+2:SP+4 = value to set it to
 	; pops argument from stack, destroys BX, CX, SI
 setclusterinfats:
 	push	bp
 	mov	bp, sp
+	;FIXME I'm broken on FAT12
 	push	ax	; Preserve actual cluster # for caller
 	push	dx
 	push	di
-	call	blockfromcluster
-	xor	cx, cx
+	mov	si, .worker
+	pop	di
+	pop	dx
+	pop	ax
+	pop	bp
+	ret	4
+.worker	xor	cx, cx
 .loop	push	cx
 	push	ax
 	push	dx
@@ -1498,11 +1537,23 @@ setclusterinfats:
 	inc	cx
 	cmp	cl, [numfats]
 	jb	.loop
-	pop	di
-	pop	dx
-	pop	ax
-	pop	bp
-	ret	4
+	ret
+
+	; Input: DX:AX = cluster, SI = worker function
+	; Output: same as call SI
+	; Preserves SI, BP and calls SI with DX:AX = offset into first FAT, DI = offset into block
+getsetcluster:
+	cmp	[fatsize], byte 12
+	jne	.not12f
+	push	[sectorsperchunk]
+	mov	cx, [sectorsperfat]
+	mov	[sectorsperchunk], cx
+.not12f	call	blockfromcluster
+	call	si
+	cmp	[fatsize], byte 12
+	jne	.not12s
+	pop	[sectorsperchunk]
+.not12s	ret
 
 	; Input: DX:AX = cluster
 	; Ouput: DX:AX = offset into first FAT, DI = offset into block
@@ -1534,8 +1585,6 @@ blockfromcluster:
 
 	; Input: DX:AX = cluster, Output: DX:AX = sector, clobbers CX
 sectorfromcluster:
-	sub	ax, 2
-	sbb	dx, 0
 	mov	cx, dx
 	mul	word [sectspercluster]
 	push	cx
@@ -1545,15 +1594,8 @@ sectorfromcluster:
 	add	cx, ax
 	xchg	ax, dx
 	pop	ax
-	add	ax, [reservedsects]
-	adc	dx, 0
-	mov	cl, [numfats]
-.add	add	ax, [sectsperfat]
-	adc	dx, [sectsperfat + 2]
-	dec	cl
-	jnz	.add
-	add	ax, [rootdirsects]
-	adc	dx, 0
+	add	ax, [zerothclustsect]
+	adc	dx, [zerothclustsect + 2]
 	ret
 
 	; Writes a FAT block back to disk
@@ -1588,15 +1630,17 @@ writebackfat:
 	ret
 
 	; Descend a directory tree. Called once with root dir as argument, and once
-	; for each recovered directory. DX:AX = cluster, CX=starting offset (0 or 2).
+	; for each recovered directory. DX:AX = cluster (0 = root)
 	; DI:SI = caller patchpoint *sector*, BX = caller patchpoint *byte* offset
 	; of start of directory entry. If DI:SI points to start of FAT; BX = 1
 	; which is a special case for update root directory starting cluster.
 	; You don't have to worry about which FAT type it is.
 	; Destroys all registers other than DS,SS
 descendtree:
+	call	invalidatenextcluster
 	mov	bp, sp
 	sub	bp, 38
+	push	cx		; Shove starting offset
 	mov	es, [buf4seg]
 	xor	cx, cx
 	mov	[bp - 10], cx	; BP - 10 = VFAT entry reset
@@ -1609,8 +1653,9 @@ descendtree:
 	mov	[bp - 26], cx	; BP - 26 = enumerator state
 				;	0 = normal
 				;	2 = set not directory and resume
-				;	4 = set 2E scan (VFAT or /Z)
+				;	4 = set E5 scan (VFAT or /Z)
 				;	6 = fix .. scan
+				;	8 = look for nonzero scan
 				; BP - 30 = enumerator recovery state cluster
 				; BP - 32 = enumerator recovery state offset
 	mov	[bp - 36], cx	; BP - 38 = sector loaded into buf2seg
@@ -1629,6 +1674,10 @@ descendtree:
 	mov	[es:si + 6], dx
 	xor	di, di
 	cmp	bx, 1
+	jne	.start_isnotroot
+	cmp	ax, [rootclust]
+	jne	.start_isnotroot
+	cmp	dx, [rootclust]
 	jne	.start_isnotroot
 	mov	di, 2		; Skip initial . and ..
 .start_isnotroot:
@@ -1652,7 +1701,13 @@ descendtree:
 .readdirentryproc:
 	mov	ax, [es:si + 8]
 	xor	dx, dx
+	cmp	[es:si + 4], dx
+	jne	.readdirflag
+	cmp	[es:si + 6], dx
+	je	.readdirnoflag
+.readdirflag:
 	and	ax, 7FFFh
+.readdirnoflag:
 	div	word [bp - 4]
 	mov	di, dx	; Entry within chunk
 	mov	bx, ax	; Chunk within cluster
@@ -1674,6 +1729,7 @@ descendtree:
 	dec	cl
 	jnz	.rfa
 	jmp	.readdirchunk
+	call	invalidatenextcluster
 .readdircluster:
 	mov	cx, [bp - 8]
 	mov	[bp - 6], cx
@@ -1719,14 +1775,25 @@ descendtree:
 	cmp	[es:bx], byte 0E5h
 	je	.skipentry
 	jmp	ax
-.advancenorollover
-	test	[bp - 9], byte 1
-	jz	.postreaddirbadsector
-	jmp	.readdirentryproc	; Cache invalidated: reload
 .skipentry:				; Don't process this one, OR return from processor
 	mov	es, [buf4seg]
 	inc	[es:si + 8]
 	inc	di
+	test	si, si
+	jnz	.skipentrynotroot
+	cmp	[es:si + 4], word 2
+	jae	.skipentrynotroot
+	cmp	[es:si + 6], word 0
+	jne	.skipentrynotroot
+	mov	ax, [es:si + 8]
+	cmp	ax, [rootdirentries]
+	jb	.skipentrynotroot
+	jmp	.enddirectory
+.advancenorollover:
+	test	[bp - 9], byte 1
+	jz	.postreaddirbadsector
+	jmp	.readdirentryproc	; Cache invalidated: reload
+.skipentrynotroot:
 	mov	ax, [es:si + 4]
 	mov	dx, [es:si + 6]
 	mov	bx, [es:si + 8]
@@ -1746,9 +1813,39 @@ descendtree:
 	cmp	di, [bp - 4]
 	jb	.advancenorollover
 	call	.dirwritebackifdirty
-	
+	test	si, si
+	jnz	.advancenotroot
+	cmp	[es:si + 4], si
+	jne	.advancenotroot
+	cmp	[es:si + 6], si
+	jne	.advancenotroot
+	jmp	.readdirentryproc
+.advancenotroot:
+	mov	ax, [es:si + 4]
+	mov	dx, [es:si + 6]
+	mov	es, [buf1seg]
+	call	getnextcluster
+	mov	es, [buf4seg]
+	cmp	dx, [highestclust + 2]
+	jb	.advanceiscluster
+	cmp	ax, [highestclust]
+	jae	.enddirentry
 	; PSYCH; "special case" on input is general case on advance
-
+	mov	[es:si + 4], ax
+	mov	[es:si + 6], dx
+	and	[es:si + 8], 7FFFh
+	mov	[bp - 22], ax
+	mov	[bp - 24], dx
+	mov	bx, [reservedsects]
+	mov	[bp - 20], si
+	mov	[bp - 18], word 0
+	jmp	.readdirentryproc
+.enddirectory:
+	test	si, si
+	jz	.endscan
+	sub	si, 10
+	jmp	.skipentry
+.endscan:
 	mov	sp, bp
 	ret
 
@@ -1807,15 +1904,51 @@ descendtree:
 	or	[bp - 9], byte 2	; set dirty bit
 	;fall-through
 
-.scannormal:
+.scannormal_entry:
+	mov	cx, 0FFFFh
+	cmp	[es:bx + 0Bh], cl
+	jne	.scannormal_notallones
+	cmp	[es:bx + 1Ah], cx
+	jne	.scannsetnormal_notallones
+	cmp	[fatsize], byte 16
+	je	.scansetnormal_allones
+	cmp	[es:bx + 14h], cx
+	jne	.scannsetnormal_notallones
+.scansetnormal_allones:
+	mov	[es:bx], byte 0E5h	; Auto-repair all ones entry (recovered bad sector *properly*)
+	mov	[es:bx + 0Dh], byte 0E5h
+	or	[bp - 9], byte 2	; set dirty bit
+	jmp	.skipentry
+.scansetnormal_notallones:
 	test	[es:bx + 0Bh], byte 8
 	jnz	.scanvolume
-	test	[bp - 9], byte 0FFh
+	test	[bp - 10], byte 0FFh
 	jnz	.scanlfnremoveprev
-	;TODO
+	;TODO write teh following checks:
+	;1) first cluster
+	;2) crosslinked
+	;3) file name
+	;If directory bit is set, recurse
 	jmp	.skipentry
 
-.scannset2e:
+.scannormal_end:
+	jmp	.enddirectory
+.scannormal:
+	cmp	[es:bx], byte 0
+	jne	.scannormal_entry
+	test	[opflags], byte opflag_z
+	jz	.scannormal_end
+	mov	es, [buf4seg]
+	mov	ax, [es:si + 4]		; Set up for setting 2E if an entry is found below
+	mov	dx, [es:si + 6]
+	mov	bx, [es:si + 8]
+	mov	[bp - 32], bx
+	mov	[bp - 30], ax
+	mov	[bp - 28], dx
+	mov	[bp - 26], byte 8
+	jmp	.skipentry
+
+.scannsete5:
 	mov	[es:bx], byte 0E5h
 	mov	[es:bx + 0Bh], byte 0
 	mov	[es:bx + 0Dh], byte 0E5h
@@ -1867,7 +2000,23 @@ descendtree:
 	call	diskwrite0
 	pop	di
 	pop	si
+.scannskipreturn_vnotzero:
 	jmp	.scanskipreturn
+
+.scannotzero:
+	cmp	[es:bx], byte 0
+	je	.scannscipreturn_vnotzero
+	mov	bx, [bp - 32]
+	mov	ax, [bp - 30]
+	mov	dx, [bp - 28]
+	xchg	ax, [es:si + 4]			; Set exit point
+	xchg	dx, [es:si + 6]
+	xchg	bx, [es:si + 8]
+	mov	[bp - 32], bx
+	mov	[bp - 30], ax
+	mov	[bp - 28], dx
+	mov	[bp - 26], byte 4
+	jmp	.scanskipreturn_vnotzero
 
 .dirwritebackifdirty:
 	test	[bp - 9], byte 2
@@ -1912,7 +2061,7 @@ descendtree:
 	push	[bp - 24]
 	mov	es, [buf2seg]
 	call	recoverbadsector
-	; FIXME invalidate FAT cache
+	call	invalidatenextcluster
 	mov	es, [buf4seg]
 	pop	di
 	pop	si
@@ -1971,8 +2120,8 @@ recoverbadsector:
 	call	sectorfromcluster
 	mov	[bp - 8], ax	; BP - 6 = sector being replaced
 	mov	[bp - 6], dx
-	call	nextcluster
-	call	alloccluster
+	call	getnextcluster
+	call	alloccluster	; Argument to alloccluster is the value to set it to
 	mov	[bp - 12], ax	; BP - 12 = replaced cluster
 	mov	[bp - 10], dx
 	call	sectorfromcluster
@@ -2588,8 +2737,9 @@ shelltabs_end:
 descendtreetable:
 	dw	descendtree.scannormal
 	dw	descendtree.scansetnotdir
-	dw	descendtree.scanset2e
+	dw	descendtree.scansete5
 	dw	descendtree.scansetparent
+	dw	descendtree.scannonzero
 
 fptrcnt	equ	8
 fptrs12:
@@ -2626,6 +2776,8 @@ fptrs32:
 msg_usage	db	'Usage: SSDSCAN DRIVE: [/F] [/C] [/D]', 13, 10
 		db	'/F   Fix errors without prompting', 13, 10
 		db	'/C   Check chain length against file length', 13, 10, '$'
+		db	'/Z   Recovery directories that have zeroed sectors in the middle', 13, 10, '$'
+		db	'     (caution: 0 is normally the directory terminator; can damage FS instead', 13, 10, '$'
 		db	'/D   Describe filesystem'
 out_newline	db	13, 10, '$'
 msg_nocmem	db	'Insufficient Conventional Memory available to check any disk.', 13, 10, '$'
@@ -2714,9 +2866,9 @@ rootdirentries	resb	4
 sectsperfat	resb	4
 firstclustsect	resb	4
 
-zerothclustsect	resb	4
+zerothclustsect	resb	4		; Optimization hack: direct multiply and add to get sector
 highestclust	resb	4
-		resb	4
+clustinbuffer	resb	4
 		resb	4
 
 rootdirsects	resb	2
@@ -2750,6 +2902,7 @@ b_mem_xms	equ	5
 opflag_f	equ 1
 opflag_c	equ 2
 opflag_d	equ 4
+opflag_z	equ 8
 opflag2_bigdisk	equ 1
 opflag2_7305	equ 2
 opflag2_ebpb	equ 4
