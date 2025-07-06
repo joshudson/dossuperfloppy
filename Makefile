@@ -59,6 +59,9 @@ BIOSRAM.COM: biosram.asm
 DUMMYCHK.COM: dummycheck.asm
 	nasm -f bin -o DUMMYCHK.COM dummycheck.asm
 
+RBPB.COM: rbpb.asm
+	nasm -f bin -o RBPB.COM rbpb.asm
+
 clean:
 	rm -f LICENSE.TXT FORMATHD.TXT PATCHDOS.COM FORMATHD.COM ISSF.COM FORMATHD.ZIP \
 		SSDFMT.TXT SSDFMT.COM SSDFIXBT.COM POSTNTFS.EXE SSDFMT.ZIP \
