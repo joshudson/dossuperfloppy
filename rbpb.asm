@@ -30,13 +30,13 @@ run:	sub	al, 'A'
 	mov	bh, 0
 	mov	cx, 0867h
 	mov	dx, [accessbpb]
-	;int	21h
-	;jc	.error1
+	int	21h
+	jc	.error1
 	or	[accessbpb + 1], byte 1
 	mov	ax, 440dh
 	mov	cl, 47h
-	;int	21h
-	;jc	.error2
+	int	21h
+	jc	.error2
 	xor	ax, ax
 .loop	inc	ax
 	push	ax
