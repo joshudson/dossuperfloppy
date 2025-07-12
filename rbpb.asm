@@ -29,7 +29,7 @@ run:	sub	al, 'A'
 	mov	bl, [disk]
 	mov	bh, 0
 	mov	cx, 0867h
-	mov	dx, [accessbpb]
+	mov	dx, accessbpb
 	int	21h
 	jc	.error1
 	or	[accessbpb + 1], byte 1
