@@ -939,7 +939,6 @@ stage_fat:
 .ncpy31	pop	ds
 	jmp	.quantify_apply_finished
 
-	;DEBUG: subsequent scans report faulty mismatch
 .quantify_loop:
 	mov	ch, 0
 	shl	ch, cl
@@ -1323,7 +1322,7 @@ stage_dirwalk:
 	mov	ax, [rootclust]
 	mov	dx, [rootclust + 2]
 	mov	si, [reservedsects]
-	mov	di, [reservedsecs + 2]
+	mov	di, [reservedsects + 2]
 	mov	bx, 1
 	call	descendtree
 	
@@ -1491,7 +1490,7 @@ getnextcluster:
 	inc	cl
 	cmp	cl, [numfats]
 	jb	.loop
-	jmp	newbadsector	; Oof
+	jmp	newbadsectors	; Oof
 .found	pop	di
 	jmp	[entryfromblock]
 
@@ -1543,16 +1542,16 @@ setclusterinfats:
 	; Output: same as call SI
 	; Preserves SI, BP and calls SI with DX:AX = offset into first FAT, DI = offset into block
 getsetcluster:
-	cmp	[fatsize], byte 12
+	cmp	[fattype], byte 12
 	jne	.not12f
-	push	[sectorsperchunk]
-	mov	cx, [sectorsperfat]
-	mov	[sectorsperchunk], cx
+	push	word [sectsperchunk]
+	mov	cx, [sectsperfat]
+	mov	[sectsperchunk], cx
 .not12f	call	blockfromcluster
 	call	si
-	cmp	[fatsize], byte 12
+	cmp	[fattype], byte 12
 	jne	.not12s
-	pop	[sectorsperchunk]
+	pop	word [sectsperchunk]
 .not12s	ret
 
 	; Input: DX:AX = cluster
@@ -1586,11 +1585,11 @@ blockfromcluster:
 	; Input: DX:AX = cluster, Output: DX:AX = sector, clobbers CX
 sectorfromcluster:
 	mov	cx, dx
-	mul	word [sectspercluster]
+	mul	word [sectsperclust]
 	push	cx
 	xchg	ax, dx
 	mov	cx, dx
-	mul	word [sectspercluster]	; Cannot overflow
+	mul	word [sectsperclust]	; Cannot overflow
 	add	cx, ax
 	xchg	ax, dx
 	pop	ax
@@ -1693,9 +1692,9 @@ descendtree:
 	mov	ax, [sectsperclust]	; DX already 0 because the above mul
 	div	word [sectsperchunk]
 	mov	[bp - 2], ax	; BP - 2 = chunks per cluster
-	mul	ax, [bytespersector]
+	mul	word [bytespersector]
 	mov	cx, 32
-	div	ax, cx
+	div	cx
 	mov	[bp - 4], ax	; BP - 4 = entries per chunk
 
 .readdirentryproc:
@@ -1777,7 +1776,7 @@ descendtree:
 	jmp	ax
 .skipentry:				; Don't process this one, OR return from processor
 	mov	es, [buf4seg]
-	inc	[es:si + 8]
+	inc	word [es:si + 8]
 	inc	di
 	test	si, si
 	jnz	.skipentrynotroot
@@ -1829,11 +1828,12 @@ descendtree:
 	cmp	dx, [highestclust + 2]
 	jb	.advanceiscluster
 	cmp	ax, [highestclust]
-	jae	.enddirentry
+	jae	.enddirectory
+.advanceiscluster:
 	; PSYCH; "special case" on input is general case on advance
 	mov	[es:si + 4], ax
 	mov	[es:si + 6], dx
-	and	[es:si + 8], 7FFFh
+	and	[es:si + 8], word 7FFFh
 	mov	[bp - 22], ax
 	mov	[bp - 24], dx
 	mov	bx, [reservedsects]
@@ -1850,7 +1850,7 @@ descendtree:
 	ret
 
 .scanvolume:
-	cmp	[es:bx + 0Bh], 0Fh
+	cmp	[es:bx + 0Bh], byte 0Fh
 	je	.scanlfn
 .scanlfnskipentryv:
 	jmp	.skipentry	; It's a volume label. Nothing to do.
@@ -1880,7 +1880,7 @@ descendtree:
 .scanlfnremovethis:
 	stc
 .scanlfnremove:
-	mov	[bp - 10], 0
+	mov	[bp - 10], byte 0
 	mov	es, [buf2seg]
 	mov	ax, [es:si + 4]
 	mov	dx, [es:si + 6]
@@ -1900,20 +1900,20 @@ descendtree:
 
 .scansetnotdir:
 	mov	[bp - 26], byte 0
-	and	[es:bx + 0Bh], 0EFh	; Clear directory flag
+	and	[es:bx + 0Bh], byte 0EFh; Clear directory flag
 	or	[bp - 9], byte 2	; set dirty bit
 	;fall-through
 
 .scannormal_entry:
 	mov	cx, 0FFFFh
 	cmp	[es:bx + 0Bh], cl
-	jne	.scannormal_notallones
+	jne	.scansetnormal_notallones
 	cmp	[es:bx + 1Ah], cx
-	jne	.scannsetnormal_notallones
-	cmp	[fatsize], byte 16
+	jne	.scansetnormal_notallones
+	cmp	[fattype], byte 16
 	je	.scansetnormal_allones
 	cmp	[es:bx + 14h], cx
-	jne	.scannsetnormal_notallones
+	jne	.scansetnormal_notallones
 .scansetnormal_allones:
 	mov	[es:bx], byte 0E5h	; Auto-repair all ones entry (recovered bad sector *properly*)
 	mov	[es:bx + 0Dh], byte 0E5h
@@ -1924,13 +1924,81 @@ descendtree:
 	jnz	.scanvolume
 	test	[bp - 10], byte 0FFh
 	jnz	.scanlfnremoveprev
-	;TODO write teh following checks:
-	;1) first cluster
-	;2) crosslinked
-	;3) file name
-	;If directory bit is set, recurse
+	;TODO check file name
+	xor	dx, dx
+	mov	ax, [es:bx + 1Ah]
+	cmp	[fattype], byte 16
+	jbe	.scannormal_not32get
+	mov	dx, [es:bx + 14h]
+.scannormal_not32get:
+	test	dx, dx
+	jnz	.scannormal_notlow
+	cmp	ax, 1
+	je	.scannormal_anomalous
+	cmp	dx, [highestclust + 2]
+	jb	.scannormal_notlow
+	cmp	ax, [highestclust]
+	jb	.scannormal_notlow
+.scannormal_anomalous:
+	mov	cx, state_dir
+	mov	dx, query_anomfile
+	call	queryfixyn
+	cmp	al, 'y'
+	jne	.skipentry
+	jmp	.scansetnormal_allones	; Fix (delete) anomalous file
+.scannormal_notlow:
+	test	ax, ax
+	jnz	.scannormal_notempty
+	test	dx, dx
+	jnz	.scannormal_notempty
+	; Empty file
+	; TODO check if directory attribute is set
 	jmp	.skipentry
+.scannormal_notempty:
 
+	push	bx
+	push	si	
+	push	ax
+	push	dx
+	call	getbitsclust
+	test	ch, 2
+	jz	.scanbits_free
+	test	ch, 1
+	jnz	.scanbits_xlink
+	mov	cl, 2
+	pop	dx
+	pop	ax
+	call	setbitsclust
+	pop	si
+	pop	bx
+	; TODO check for directory flag and descend into directory
+	; TODO increment work counter
+	jmp	.skipentry
+.scanbits_free:
+	mov	cx, state_dir
+	mov	dx, query_freefile
+	call	queryfixyn
+	cmp	al, 'y'
+	jne	.scanbits_nofix
+	jmp	.scanbits_delete
+.scanbits_xlink:
+	mov	cx, state_dir
+	mov	dx, query_xlinkfile
+	call	queryfixyn
+	cmp	al, 'y'
+	jne	.scanbits_nofix
+.scanbits_delete:
+	pop	dx
+	pop	ax
+	pop	si
+	pop	bx
+	jmp	.scansetnormal_allones
+.scanbits_nofix:
+	pop	dx
+	pop	ax
+	pop	si
+	pop	bx
+	jmp	.skipentry
 .scannormal_end:
 	jmp	.enddirectory
 .scannormal:
@@ -1948,7 +2016,7 @@ descendtree:
 	mov	[bp - 26], byte 8
 	jmp	.skipentry
 
-.scannsete5:
+.scansete5:
 	mov	[es:bx], byte 0E5h
 	mov	[es:bx + 0Bh], byte 0
 	mov	[es:bx + 0Dh], byte 0E5h
@@ -1965,7 +2033,7 @@ descendtree:
 	jz	.scanskipreturn
 	mov	ax, [es:bx + 1Ah]
 	xor	dx, dx
-	cmp	[fatsize], byte 32
+	cmp	[fattype], byte 32
 	jne	.scanfixparent_notfat32
 	mov	dx, [es:bx + 14h]
 .scanfixparent_notfat32:
@@ -1991,7 +2059,7 @@ descendtree:
 	mov	cx, [es:si + 2]
 	mov	es, [buf2seg]
 	mov	[es:3Ah], bx
-	cmp	[fatsize], byte 32
+	cmp	[fattype], byte 32
 	jne	.scanfixparent_notfat32dentry
 	mov	[es:34h], cx
 .scanfixparent_notfat32dentry:
@@ -2000,12 +2068,12 @@ descendtree:
 	call	diskwrite0
 	pop	di
 	pop	si
-.scannskipreturn_vnotzero:
+.scanskipreturn_vnotzero:
 	jmp	.scanskipreturn
 
 .scannotzero:
 	cmp	[es:bx], byte 0
-	je	.scannscipreturn_vnotzero
+	je	.scanskipreturn_vnotzero
 	mov	bx, [bp - 32]
 	mov	ax, [bp - 30]
 	mov	dx, [bp - 28]
@@ -2055,10 +2123,10 @@ descendtree:
 	push	di
 	mov	cx, .recbadsectorfill
 	push	cx
-	push	[bp - 18]
-	push	[bp - 20]
-	push	[bp - 22]
-	push	[bp - 24]
+	push	word [bp - 18]
+	push	word [bp - 20]
+	push	word [bp - 22]
+	push	word [bp - 24]
 	mov	es, [buf2seg]
 	call	recoverbadsector
 	call	invalidatenextcluster
@@ -2129,9 +2197,9 @@ recoverbadsector:
 	mov	[bp - 14], dx
 	
 	mov	si, [sectsperclust]
-	push	[sectsperchunk]
+	push	word [sectsperchunk]
 	mov	[sectsperchunk], word 1
-.recsecbadsectorloop:
+.recbadsectorloop:
 	push	si
 	mov	ax, [bp - 8]
 	mov	dx, [bp - 6]
@@ -2151,7 +2219,7 @@ recoverbadsector:
 	adc	[bp - 14], word 0
 	dec	si
 	jnz	.recbadsectorloop
-	pop	[sectsperchunk]
+	pop	word [sectsperchunk]
 
 	;update previous reference
 	mov	ax, [bp + 8]
@@ -2169,13 +2237,13 @@ recoverbadsector:
 	cmp	ax, 1
 	jbe	.isboot
 .iscluster:
-	push	[bp - 10]
-	push	[bp - 12]
+	push	word [bp - 10]
+	push	word [bp - 12]
 	call	setclusterinfats
-	jmp	.cleanupafterbad
+	jmp	.epilog
 .isboot:
 	; If we get here, must be a FAT32 EBPB
-	push	[sectsperchunk]
+	push	word [sectsperchunk]
 	mov	[sectsperchunk], word 1
 	xor	ax, ax
 	xor	dx, dx
@@ -2207,6 +2275,7 @@ recoverbadsector:
 	mov	ch, 0
 	call	diskwrite0
 .nobackupbootsector:
+	pop	word [sectsperchunk]
 	jmp	.epilog
 .issector:	; Operates on chunk at once
 	push	ax
@@ -2738,8 +2807,8 @@ descendtreetable:
 	dw	descendtree.scannormal
 	dw	descendtree.scansetnotdir
 	dw	descendtree.scansete5
-	dw	descendtree.scansetparent
-	dw	descendtree.scannonzero
+	dw	descendtree.scanfixparent
+	dw	descendtree.scannotzero
 
 fptrcnt	equ	8
 fptrs12:
@@ -2812,6 +2881,9 @@ query_clustone	db	"Encountered mid-allocation cluster value, repair?$"
 query_freealloc	db	"Encountered free block in use, allocate?$"
 query_clustout	db	"Encountered out-of-range cluster value, repair?$"
 query_xlink	db	"Encountered cross-linked cluster, repair?$"
+query_anomfile	db	"Encountered anomalous directory entry, delete?$"
+query_freefile	db	"File refers to a free cluster, delete?$"
+query_xlinkfile	db	"File refers to a crosslinked cluster, delete?$"
 msg_nogoodfat	db	"Correlated bad sectors destroyed FAT.", 13, 10, '$'
 msg_rootdirlost	db	"Root directory lost", 13, 10, '$'
 msg_rootbadsect	db	"Bad sector encountered in root directory", 13, 10, '$'
