@@ -507,7 +507,7 @@ stage_media_descriptor:
 	sbb	dx, 0
 	mov	[zerothclustsect], ax
 	mov	[zerothclustsect], dx
-	
+
 	test	[opflags], byte opflag_d
 	jz	initpools
 display1:
@@ -1053,7 +1053,8 @@ stage_fat:
 .isdesc	inc	di
 	call	[entryfromblock]
 	test	[opflags + 1], byte opflag2_rclust
-	jnz	.secondnormal
+	jz	.secondnormal
+	;FIXME this code blows up if DX:AX is out of range -- this isn't a recoverable situation so we can only raise an error
 	mov	[rootclust], ax
 	mov	[rootclust + 2], dx
 	mov	cl, 2
@@ -1639,7 +1640,6 @@ descendtree:
 	call	invalidatenextcluster
 	mov	bp, sp
 	sub	bp, 38
-	push	cx		; Shove starting offset
 	mov	es, [buf4seg]
 	xor	cx, cx
 	mov	[bp - 10], cx	; BP - 10 = VFAT entry reset
@@ -1671,14 +1671,14 @@ descendtree:
 	mov	[es:si + 2], dx	; TODO: check if FAT32 wants 0 or cluster for .. to root
 	mov	[es:si + 4], ax	; Current cluster of directory
 	mov	[es:si + 6], dx
-	xor	di, di
+	mov	di, 2		; Skip initial . and ..
 	cmp	bx, 1
 	jne	.start_isnotroot
 	cmp	ax, [rootclust]
 	jne	.start_isnotroot
-	cmp	dx, [rootclust]
+	cmp	dx, [rootclust + 2]
 	jne	.start_isnotroot
-	mov	di, 2		; Skip initial . and ..
+	xor	di, di		; But root dir does not have them
 .start_isnotroot:
 	mov	[bp - 34], di	; BP - 34 = Restart point
 	mov	[es:si + 8], di	; Entry within cluster and control flag (0 = manual fix cluster, 1 = auto fix cluster)
@@ -1698,27 +1698,23 @@ descendtree:
 	mov	[bp - 4], ax	; BP - 4 = entries per chunk
 
 .readdirentryproc:
+	mov	ax, [es:si + 6]
+	call	outax
+	mov	ax, [es:si + 4]
+	call	outax
 	mov	ax, [es:si + 8]
 	xor	dx, dx
 	cmp	[es:si + 4], dx
-	jne	.readdirflag
+	jne	.readdircluster
 	cmp	[es:si + 6], dx
-	je	.readdirnoflag
-.readdirflag:
-	and	ax, 7FFFh
-.readdirnoflag:
+	jne	.readdircluster
+
 	div	word [bp - 4]
 	mov	di, dx	; Entry within chunk
-	mov	bx, ax	; Chunk within cluster
 
-	mov	ax, [si + 4]
-	mov	dx, [si + 6]
-	mov	cx, ax
-	or	cx, dx
-	jnz	.readdircluster
 	; Read root directory entry
-	mov	ax, [rootdirentries]
-	mov	[bp - 6], ax	; BP - 6 = overflow check value
+	mov	bx, [rootdirentries]
+	mov	[bp - 6], bx	; BP - 6 = overflow check value
 	xor	dx, dx
 	add	ax, [reservedsects]
 	adc	dx, 0
@@ -1727,16 +1723,23 @@ descendtree:
 	adc	dx, [sectsperfat + 2]
 	dec	cl
 	jnz	.rfa
+	call	invalidatenextcluster	; TODO ???
+	call	outax
 	jmp	.readdirchunk
-	call	invalidatenextcluster
 .readdircluster:
+	and	ax, 7FFFh
+	div	word [bp - 4]
+	mov	di, dx	; Entry within chunk
+	mov	bx, ax	; Chunk within cluster
+	mov	ax, [es:si + 4]
+	mov	dx, [es:si + 6]
 	mov	cx, [bp - 8]
 	mov	[bp - 6], cx
 	call	sectorfromcluster
 .readdirchunk:
-	test	[bp - 9], byte 1
-	jnz	.readdirchunkcachemiss
-	cmp	[bp - 38], ax
+	test	[bp - 9], byte 1	; If we're rewinding we have to check if
+	jnz	.readdirchunkcachemiss	; it's the same chunk or not, but if the
+	cmp	[bp - 38], ax		; buffer were trashed, we can force reload
 	jne	.readdirchunkcachemiss
 	cmp	[bp - 36], dx
 	je	.postreaddirbadsector
@@ -1762,9 +1765,10 @@ descendtree:
 	int	21h
 	mov	al, 3	; TODO normalize exit codes
 	jmp	exit
-.postreaddirbadsector:
+.postreaddirbadsector:			; means after the bad sector check on readdir
 
 	mov	bx, [bp - 26]
+	mov	ax, bx
 	mov	ax, [descendtreetable + bx]
 
 	mov	bx, di
@@ -1922,8 +1926,10 @@ descendtree:
 .scansetnormal_notallones:
 	test	[es:bx + 0Bh], byte 8
 	jnz	.scanvolume
+	call	.out_entryname	; DEBUG
 	test	[bp - 10], byte 0FFh
 	jnz	.scanlfnremoveprev
+	call	.out_entryname	; DEBUG
 	;TODO check file name
 	xor	dx, dx
 	mov	ax, [es:bx + 1Ah]
@@ -1935,10 +1941,12 @@ descendtree:
 	jnz	.scannormal_notlow
 	cmp	ax, 1
 	je	.scannormal_anomalous
+.scannormal_notlow:
 	cmp	dx, [highestclust + 2]
-	jb	.scannormal_notlow
+	jb	.scannormal_notlow2
+	ja	.scannormal_anomalous
 	cmp	ax, [highestclust]
-	jb	.scannormal_notlow
+	jb	.scannormal_notlow2
 .scannormal_anomalous:
 	mov	cx, state_dir
 	mov	dx, query_anomfile
@@ -1946,7 +1954,8 @@ descendtree:
 	cmp	al, 'y'
 	jne	.skipentry
 	jmp	.scansetnormal_allones	; Fix (delete) anomalous file
-.scannormal_notlow:
+.scannormal_notlow2:
+	call	.out_entryname	; DEBUG
 	test	ax, ax
 	jnz	.scannormal_notempty
 	test	dx, dx
@@ -1955,6 +1964,7 @@ descendtree:
 	; TODO check if directory attribute is set
 	jmp	.skipentry
 .scannormal_notempty:
+	call	.out_entryname	; DEBUG
 
 	push	bx
 	push	si	
@@ -1973,6 +1983,7 @@ descendtree:
 	pop	bx
 	; TODO check for directory flag and descend into directory
 	; TODO increment work counter
+	call	outax
 	jmp	.skipentry
 .scanbits_free:
 	mov	cx, state_dir
@@ -2002,6 +2013,7 @@ descendtree:
 .scannormal_end:
 	jmp	.enddirectory
 .scannormal:
+	call	.out_entryname	; DEBUG
 	cmp	[es:bx], byte 0
 	jne	.scannormal_entry
 	test	[opflags], byte opflag_z
@@ -2111,7 +2123,51 @@ descendtree:
 	pop	si
 	ret
 	
-	
+.out_entryname:
+	push	ax
+	push	bx
+	push	cx
+	push	dx
+	push	bp		; Some DOS apparently depends on BIOS saving BP but some BIOS doesn't
+	mov	cl, 0
+.out_el	mov	dl, [es:bx]
+	test	cl, cl
+	jnz	.out_en0
+	cmp	dl, 05h
+	jne	.out_en0
+	mov	dl, 0e5h
+.out_en0:
+	cmp	dl, 7
+	je	.out_en0a
+	cmp	dl, 8
+	je	.out_en0a
+	cmp	dl, 9
+	je	.out_en0a
+	cmp	dl, 10
+	je	.out_en0a
+	cmp	dl, 13
+	jne	.out_en0b
+.out_en0a:
+	mov	dl, '?'
+.out_en0b:
+	mov	ah, 2
+	int	21h
+	inc	bx
+	inc	cx
+	cmp	cl, 8
+	jne	.out_en8
+	mov	dl, '.'
+	mov	ah, 2
+	int	21h
+.out_en8:
+	cmp	cl, 11
+	jne	.out_el
+	pop	bp
+	pop	dx
+	pop	cx
+	pop	bx
+	pop	ax
+	ret
 
 	; Routine for repairing bad sector in directory
 .readdirbadsector:
@@ -2306,7 +2362,35 @@ recoverbadsector:
 	mov	dx, [bp - 10]
 	mov	bp, sp
 	ret	10
-	
+
+	;Allocate cluster. ES = buffer, DX:AX = value to set it to. Trashes all registers except ES, BP
+alloccluster:
+	push	ax
+	push	dx
+	push	es
+	mov	ch, 0
+	mov	ax, .found
+	push	ax
+	call	scanbitsclust
+	mov	dx, msg_outofspace
+	mov	ah, 9
+	int	21h
+	mov	ax, 4C03h	; TODO Normalize exit codes
+	int	21h
+.found	mov	sp, bp		; longjmp!
+	pop	bp
+	pop	cx		; Trash
+	pop	es
+	;DX:AX is allocated cluster
+	;on stack is cluster to point it to
+	push	dx
+	push	ax
+	mov	ch, 3
+	call	setbitsclust
+	pop	ax
+	pop	dx
+	call	setclusterinfats
+	ret
 	
 	; Entry point; DX:AX = base cluster no, DI = offset
 	; Result in CH; destroys everything but DI and ES
@@ -2378,7 +2462,126 @@ bitsclustcommon:
 	mov	bx, ax
 	ret
 .xms	int3	; TODO fetch from XMS
-.fault	int3
+.fault	int3	; FIXME
+
+	; Locate all entries matching a pattern
+	; Arguments: CH = pattern, stack = callback (called with bp + 4 = address of callback)
+	; Destroys all registers other than CS,DS,SS,BP
+scanbitsclust:
+	push	bp
+	mov	bp, sp
+	sub	sp, 4		; May be used later for xms routine
+	mov	si, bitvectorptrs
+	xor	dx, dx
+	mov	ax, 2
+	mov	cl, 4
+	shl	ch, cl
+
+	; Outer loop -- get bitvector to enumerate
+.outer	cmp	[si + bitvectortype], byte 0
+	je	.retouter
+	cmp	[si + bitvectortype], byte b_mem_xms
+	je	.xms
+	ja	.fault
+	mov	es, [si + bitvectorptr]
+	mov	bx, [si + bitvectorlength + 2]
+	mov	di, [si + bitvectorlength]
+	call	.div2ceil	; 4 entries per byte
+	call	.div2ceil
+	; Tricky part: do big chunks first
+	push	di
+	xor	di, di
+.mid	test	bx, bx
+	jnz	.mide
+	call	.inner
+	push	ax
+	mov	ax, es
+	add	ax, 1000h
+	mov	es, ax
+	pop	ax
+	dec	bx
+	jmp	.mid
+.mide	pop	di
+	call	.inner
+.cont	add	si, 8
+	jmp	.outer
+.retouter:	
+	add	sp, 4
+	pop	bp
+	ret
+.xms	int3	;TODO fetch from XMS
+.fault	int3	;FIXME
+
+.div2ceil:
+	shr	bx, 1
+	rcr	di, 1
+	adc	di, 0		; The last entry might not be a multiple of 4
+	adc	bx, 0
+	ret
+
+.inner	push	bx
+	xor	bx, bx
+	test	al, 2		; Loop is unrolled -- must be first entry
+	je	.inner2
+
+.innerl	mov	cl, [es:bx]
+	and	cl, 3
+	cmp	ch, cl
+	jne	.nm0
+	call	.match		; Extra layer of indrection on match
+.nm0	rol	ch, 1
+	rol	ch, 1
+	inc	ax		; Alignment: can only overflow at the last part of the loop
+	mov	cl, [es:bx]
+	and	cl, 0Ch
+	cmp	ch, cl
+	jne	.nm1
+	call	.match
+.nm1	rol	ch, 1
+	rol	ch, 1
+	inc	ax
+.inner2	mov	cl, [es:bx]
+	and	cl, 30h
+	cmp	ch, cl
+	jne	.nm2
+	call	.match
+.nm2	rol	ch, 1
+	rol	ch, 1
+	inc	ax
+	mov	cl, [es:bx]
+	and	cl, 0C0h
+	cmp	ch, cl
+	jne	.nm3
+	call	.match
+.nm3	rol	ch, 1
+	rol	ch, 1
+	add	ax, 1
+	adc	dx, 0
+	inc	bx
+	cmp	bx, di
+	jne	.innerl
+	ret
+
+.match	cmp	dx, [highestclust + 2]	; Skip garbage entries at end of list (up to 3 possible)
+	jb	.matchx
+	cmp	ax, [highestclust]
+	je	.matchr
+.matchx	push	ax			; Yes we save every single register. We're using them.
+	push	bx			; Caller will make absolute hash of them repairing
+	push	cx			; stuff anyway. Might as well write register save once.
+	push	dx
+	push	si
+	push	di
+	push	es
+	call	[bp + 4]
+	pop	es
+	pop	di
+	pop	si
+	pop	dx
+	pop	cx
+	pop	bx
+	pop	ax
+.matchr	ret
 
 ;Routines used by FAT repair
 ;bp - 16: number of words in a FAT block
@@ -2889,6 +3092,8 @@ msg_rootdirlost	db	"Root directory lost", 13, 10, '$'
 msg_rootbadsect	db	"Bad sector encountered in root directory", 13, 10, '$'
 msg_replacer	db	"New bad sector encountered reading SSD; advise immediate replacement", 13, 10, '$'
 msg_replace	db	"Bad sector encountered writing to SSD; advise immediate replacement", 13, 10, '$'
+msg_outofspace	db	"Ran out of space repairing disk, free some up.", 13, 10
+		db	"The file system should be good enough to move a file off the disk.", 13, 10, '$'
 
 	align	16, db 0		; Everything depends on _bss being aligned!
 
