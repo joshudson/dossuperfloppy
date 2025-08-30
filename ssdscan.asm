@@ -1121,7 +1121,7 @@ stage_fat:
 	jne	.notbadblock
 	mov	ax, [bp - 6]
 	mov	dx, [bp - 4]
-	mov	cl, 3
+	mov	cl, 3		; It's bad; therefore it's accounted for all by itself
 	call	setbitsclustdi
 	jmp	.clustdone
 .notbadblock:
@@ -1130,7 +1130,9 @@ stage_fat:
 	; Must be allocated block
 	push	dx
 	push	ax
+	mov	ax, [bp - 6]
 	mov	dx, [bp - 4]
+	mov	cl, 2
 	call	setbitsclustdi
 	pop	ax
 	pop	dx
@@ -1168,7 +1170,7 @@ stage_fat:
 	push	dx
 	call	getbitsclust
 	test	ch, 2
-	jnz	.notoverlargexvector
+	jnz	.notoverlargexvector	; Fixes up stack and jmps to .notoverlarge
 	mov	cx, state_fat
 	mov	dx, query_freealloc
 	call	queryfixyn
@@ -1325,6 +1327,7 @@ stage_dirwalk:
 	mov	si, [reservedsects]
 	mov	di, [reservedsects + 2]
 	mov	bx, 1
+
 	call	descendtree
 	
 	; Next: recover directories
@@ -1500,11 +1503,11 @@ getnextcluster:
 setclusterinfats:
 	push	bp
 	mov	bp, sp
-	;FIXME I'm broken on FAT12
 	push	ax	; Preserve actual cluster # for caller
 	push	dx
 	push	di
 	mov	si, .worker
+	call	getsetcluster
 	pop	di
 	pop	dx
 	pop	ax
@@ -1518,8 +1521,8 @@ setclusterinfats:
 	call	diskread0
 	jc	.skip
 	pop	di
-	mov	ax, [bp + 6]
-	mov	dx, [bp + 4]
+	mov	ax, [bp + 4]
+	mov	dx, [bp + 6]
 	call	[entrytoblock]
 	pop	dx
 	pop	ax
@@ -1639,12 +1642,11 @@ writebackfat:
 descendtree:
 	call	invalidatenextcluster
 	mov	bp, sp
-	sub	bp, 38
+	sub	sp, 38
 	mov	es, [buf4seg]
 	xor	cx, cx
 	mov	[bp - 10], cx	; BP - 10 = VFAT entry reset
 				; BP - 9 = state flags
-	mov	[bp - 16], cx
 	mov	[bp - 18], di	; BP - 20 = patchpoint sector
 	mov	[bp - 20], si
 	mov	[bp - 22], bx	; BP - 22 = patchpoint byte offset
@@ -1698,10 +1700,11 @@ descendtree:
 	mov	[bp - 4], ax	; BP - 4 = entries per chunk
 
 .readdirentryproc:
-	mov	ax, [es:si + 6]
-	call	outax
-	mov	ax, [es:si + 4]
-	call	outax
+	call	checkmark
+	;mov	ax, [es:si + 6]
+	;call	outax
+	;mov	ax, [es:si + 4]
+	;call	outax
 	mov	ax, [es:si + 8]
 	xor	dx, dx
 	cmp	[es:si + 4], dx
@@ -1724,7 +1727,6 @@ descendtree:
 	dec	cl
 	jnz	.rfa
 	call	invalidatenextcluster	; TODO ???
-	call	outax
 	jmp	.readdirchunk
 .readdircluster:
 	and	ax, 7FFFh
@@ -1768,7 +1770,6 @@ descendtree:
 .postreaddirbadsector:			; means after the bad sector check on readdir
 
 	mov	bx, [bp - 26]
-	mov	ax, bx
 	mov	ax, [descendtreetable + bx]
 
 	mov	bx, di
@@ -1793,6 +1794,7 @@ descendtree:
 	jb	.skipentrynotroot
 	jmp	.enddirectory
 .advancenorollover:
+	mov	ax, [bp - 10]
 	test	[bp - 9], byte 1
 	jz	.postreaddirbadsector
 	jmp	.readdirentryproc	; Cache invalidated: reload
@@ -1926,10 +1928,8 @@ descendtree:
 .scansetnormal_notallones:
 	test	[es:bx + 0Bh], byte 8
 	jnz	.scanvolume
-	call	.out_entryname	; DEBUG
 	test	[bp - 10], byte 0FFh
 	jnz	.scanlfnremoveprev
-	call	.out_entryname	; DEBUG
 	;TODO check file name
 	xor	dx, dx
 	mov	ax, [es:bx + 1Ah]
@@ -1955,7 +1955,6 @@ descendtree:
 	jne	.skipentry
 	jmp	.scansetnormal_allones	; Fix (delete) anomalous file
 .scannormal_notlow2:
-	call	.out_entryname	; DEBUG
 	test	ax, ax
 	jnz	.scannormal_notempty
 	test	dx, dx
@@ -1964,7 +1963,7 @@ descendtree:
 	; TODO check if directory attribute is set
 	jmp	.skipentry
 .scannormal_notempty:
-	call	.out_entryname	; DEBUG
+	;call	.out_entryname	; DEBUG
 
 	push	bx
 	push	si	
@@ -1983,7 +1982,6 @@ descendtree:
 	pop	bx
 	; TODO check for directory flag and descend into directory
 	; TODO increment work counter
-	call	outax
 	jmp	.skipentry
 .scanbits_free:
 	mov	cx, state_dir
@@ -2013,7 +2011,6 @@ descendtree:
 .scannormal_end:
 	jmp	.enddirectory
 .scannormal:
-	call	.out_entryname	; DEBUG
 	cmp	[es:bx], byte 0
 	jne	.scannormal_entry
 	test	[opflags], byte opflag_z
