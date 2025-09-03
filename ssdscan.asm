@@ -2595,13 +2595,14 @@ descendtree:
 	push	word [bp - 22]
 	push	word [bp - 24]
 	jmp	.readdirbadsector_es
+.readdirbadsector_subsequent:
 	;Generate patchpoint from unwind data
 	mov	ax, [es:si + 8]
 	and	ax, 7FFFh
 	xor	dx, dx
 	mov	cx, 32
 	mul	cx
-	div	[bytespersector]
+	div	word [bytespersector]
 	xchg	ax, cx	; CX = sector offset within cluster
 	xchg	bx, dx	; BX = byte offset within sector
 	mov	ax, [es:si + 4]
@@ -3507,9 +3508,9 @@ reservednames	db	"AUX     "
 msg_usage	db	'SSDSCAN pre-alpha unusable', 13, 10
 		db	'Usage: SSDSCAN DRIVE: [/F] [/C] [/D]', 13, 10
 		db	'/F   Fix errors without prompting', 13, 10
-		db	'/C   Check chain length against file length', 13, 10, '$'
-		db	'/Z   Recovery directories that have zeroed sectors in the middle', 13, 10, '$'
-		db	'     (caution: 0 is normally the directory terminator; can damage FS instead', 13, 10, '$'
+		db	'/C   Check chain length against file length', 13, 10
+		db	'/Z   Recovery directories that have zeroed sectors in the middle', 13, 10
+		db	'     (caution: 0 is normally the directory terminator; can damage FS instead', 13, 10
 		db	'/D   Describe filesystem'
 out_newline	db	13, 10, '$'
 out_crfile	db	13, 'File $'
