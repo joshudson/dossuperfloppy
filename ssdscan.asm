@@ -32,9 +32,7 @@ ORG 0100h
 ;  if a file has no clusters its length must be zero
 ;  mark starting cluster as reached
 ;  if length flag check set, traverse FAT, checking if chain ends too soon or too late
-;    if too soon, ask extend or free
-;    if too late, must truncate
-;    as we traverse each cluster, change its bitmap entry to 01; if it already is 01 it must be a bad sector
+;   we just fix the size to match the length of the FAT chain
 
 ;Recovering lost files (we know by counters if we need to run this or not)
 ; traverse bitmap array, recover any lost files; they have value 10 in the bitmap array
@@ -1118,9 +1116,11 @@ stage_fat:
 	mov	dx, query_freealloc
 	call	queryfixyn
 	cmp	al, 'y'
-	je	.setendchain	 ; If the user says no, file will be truncated on scan pass
-	jmp	.clustdone
+	je	.setendchain	; Scan pass is tolerant of this, but the FS is still broken
+	jmp	.clustdone	; We won't allocate this cluster because of how cluster alloc works
 .notfree:
+	sub	[freeclust], word 1
+	sbb	[freeclust + 2], word 1
 	call	[isbadblock]
 	jne	.notbadblock
 	mov	ax, [bp - 6]
@@ -1183,6 +1183,8 @@ stage_fat:
 	pop	dx
 	pop	ax
 	jne	.notoverlarge
+	sub	[freeclust], word 1
+	sbb	[freeclust + 2], word 1
 	push	dx
 	push	ax
 	mov	cl, 2
@@ -1321,7 +1323,11 @@ stage_fat:
 	mov	sp, bp
 	call	checkmark
 
-
+	;Count up number of (non-empty) files in the FS
+	mov	cx, totalfilesinc
+	push	cx
+	mov	ch, 2
+	call	scanbitsclust
 stage_dirwalk:
 	mov	dx, state_dir
 	mov	ah, 9
@@ -2053,6 +2059,8 @@ descendtree:
 .scannormal_notdirectory_empty0:
 	jmp	.skipentry
 .scannormal_notempty:
+	add	[filesfound], word 1
+	adc	[filesfound + 2], word 0
 	push	bx
 	push	si	
 	push	ax
@@ -2153,7 +2161,7 @@ descendtree:
 	mov	ch, 0FFh
 	mov	cl, [descriptor]
 	push	cx
-	call	setnextcluster
+	call	setclusterinfats
 .scannormal_enddirectoryv:
 	jmp	.enddirectory
 .scannormal:
@@ -2413,37 +2421,6 @@ descendtree:
 	mov	[bp - 26], byte 4
 	jmp	.scanskipreturn_vnotzero
 
-	;Arguments: AX = '. ' or '..'
-	;BX:CX = target sector
-	;ES:DI = output buffer
-.dotentries_generatebaselineentry:
-	stosw			; 0
-	mov	ax, '  '
-	stosw
-	stosw
-	stosw
-	stosw
-	mov	ah, 10h
-	stosw			; A
-	xor	ax, ax
-	stosw			; C
-	stosw
-	stosw
-	stosw			; 12
-	mov	ax, bx
-	stosw			; 14
-	xor	ax, ax
-	mov	ax, [savedfilename + 12]
-	stosw			; 16
-	mov	ax, [savedfilename + 14]
-	stosw
-	mov	ax, cx
-	stosw			; 1A
-	xor	ax, ax
-	stosw
-	stosw
-	ret
-
 	; Rebuild trashed . entries from bad sector recovery
 .dotentries_allbits:
 	xor	di, di
@@ -2452,13 +2429,13 @@ descendtree:
 	mov	cx, [es:si]
 	mov	es, [buf4seg]
 	mov	ax, '. '
-	call	.dotentries_generatebaselineentry
+	call	generatedotdirectoryentry
 	mov	es, [buf4seg]
 	mov	bx, [es:si - 8]
 	mov	cx, [es:si - 10]
 	mov	es, [buf2seg]
 	mov	ax, '..'
-	call	.dotentries_generatebaselineentry
+	call	generatedotdirectoryentry
 	or	[bp - 9], byte 2	; set dirty bit
 	jmp	.dotentries_match2
 
@@ -3116,6 +3093,345 @@ check_dots:
 	jne	.ret
 	cmp	[es:10 + 32], byte ' '
 .ret	ret
+
+	;Arguments: AX = '. ' or '..'
+	;BX:CX = target cluster
+	;ES:DI = output buffer
+generatedotdirectoryentry:
+	stosw			; 0
+	mov	ax, '  '
+	stosw
+	stosw
+	stosw
+	stosw
+	mov	ah, 10h
+	stosw			; A
+	xor	ax, ax
+	stosw			; C
+	stosw
+	stosw
+	stosw			; 12
+	mov	ax, bx
+	stosw			; 14
+	xor	ax, ax
+	mov	ax, [savedfilename + 12]
+	stosw			; 16
+	mov	ax, [savedfilename + 14]
+	stosw
+	mov	ax, cx
+	stosw			; 1A
+	xor	ax, ax
+	stosw
+	stosw
+.ret	ret
+
+	;mklostfnd: gets or creates LOST.FND
+	;Returns cluster in DX:AX
+mklostfnd:
+	mov	ax, [mklostfndclust]
+	mov	dx, [mklostfndclust + 2]
+	mov	cx, ax
+	or	cx, dx
+	jnz	generatedotdirectoryentry.ret
+	push	bp
+	mov	bp, sp
+	sub	sp, 20
+	mov	[bp - 2], cx	; empty slot sector low
+	mov	[bp - 4], cx	; empty slot sector high
+	mov	[bp - 6], cx	; empty slot byte offset
+	mov	[bp - 8], cx	; empty slot counter
+	mov	[bp - 10], cx	; counter
+	mov	ax, [rootclust]
+	mov	dx, [rootclust + 2]
+	mov	[bp - 12], ax	; Current cluster
+	mov	[bp - 14], dx
+	mov	es, [buf1seg]
+	mov	ax, [rootclust]
+	mov	dx, [rootclust + 2]
+	mov	cx, ax
+	or	cx, dx
+	jnz	.mklostfnd_clust
+	mov	ax, [reservedsects]
+	mov	cl, [numfats]
+.rpl	add	ax, [sectsperfat]
+	adc	dx, [sectsperfat + 2]
+	loop	.rpl
+	mov	cx, [rootdirentries]
+	mov	[bp - 16], cx	; loop control
+	call	.mklostfnd_scan
+	jnc	.glost		; got it!
+	mov	cx, [bp - 10]
+	cmp	cx, [bp - 16]
+	je	.rootdirfull
+.centry	call	.mklostfnd_popentry
+.glost	mov	sp, bp
+	mov	ax, [mklostfndclust]
+	mov	dx, [mklostnfdclust + 2]
+	ret
+
+.rootdirfull:
+	mov	dx, msg_outofslots
+	mov	ah, 9
+	int	21h
+	mov	dx, msg_goodenuf
+	mov	ah, 9
+	int	21h
+	mov	al, 4
+	jmp	exit	; TODO normalize exit codes
+
+.mklostfnd_clust:
+	call	invalidatenextcluster
+	mov	ax, [bytespercluster]
+	mov	cl, 5
+	shr	ax, cl
+	mov	[bp - 16], cx	; loop control
+	mov	ax, [bp - 12]
+	mov	dx, [bp - 14]
+	mov	[bp - 18], ax	; current cluster
+	mov	[bp - 20], dx
+.cloop	call	sectorfromcluster
+	call	.mklostfnd_scan
+	jnc	.glost
+	mov	cx, [bp - 10]
+	cmp	cx, [bp - 16]
+	jb	.centry
+	push	es
+	mov	es, [buf2seg]
+	mov	ax, [bp - 18]
+	mov	dx, [bp - 20]
+	call	getnextcluster
+	call	isendchainagnostic
+	jc	.newcluster
+	mov	[bp - 18], ax
+	mov	[bp - 20], dx
+	pop	es
+	mov	[bp - 10], word 0
+	jmp	.cloop
+.newcluster:
+	mov	dx, 0FFFh
+	mov	ah, 0FFh
+	mov	al, [descriptor]
+	push	es
+	mov	es, [buf2seg]
+	mov	si, generatedotdirectoryentry.ret
+	call	initdircluster
+	push	dx
+	push	ax
+	push	dx
+	push	ax
+	mov	ax, [bp - 18]
+	mov	dx, [bp - 20]
+	call	setclusterinfats
+	pop	ax
+	pop	dx
+	pop	es
+	call	sectorfromcluster
+	mov	[bp - 2], ax
+	mov	[bp - 4], dx
+	mov	[bp - 6], 0
+	mov	[bp - 8], 0
+	jmp	.centry
+
+.mklostfnd_popentry:
+	or	[opflags + 1], byte opflag2_tbuf4	; Semi-rare case
+	call	.initcluster
+	mov	[mklostfndclust], ax
+	mov	[mklostfndclust + 2], dx
+	mov	di, [bp - 6]
+	mov	cx, [bp - 8]
+	cmp	cx, [bp - 16]
+	je	.ismidslot
+	mov	cx, [wordsperchunk]
+	shl	cx, 1
+	sub	cx, 16
+	cmp	di, cx
+	jb	.isthisslot
+	mov	ax, [bp - 2]	; Read in the *next* slot, see if it's good.
+	mov	dx, [bp - 4]
+	add	ax, 1
+	adc	dx, 0
+	push	es
+	push	di
+	mov	es, [buf4seg]
+	push	ax
+	push	dx
+	call	diskread0
+	pop	dx
+	pop	ax
+	jc	.b0n		; If the bad sector is persistent we haven't damaged anything yet
+	cmp	[es:0], byte 0
+	je	.b0n		; No need to bother
+	mov	[es:0], byte 0
+	call	diskwrite0
+.b0n	pop	di
+	pop	es
+	jmp	.ismidslot
+.isthisslot:
+	mov	[es:di + 16], byte 0
+.ismidslot:
+	mov	si, lostfnd	; Create entry
+	mov	cx, 11
+	rep	movsb
+	mov	al, 10h
+	stosb		; C
+	xor	ax, ax
+	stosw		; E
+	stosw		; 10
+	stosw		; 12
+	mov	ax, [mklostfndclust + 2]
+	stosw		; 14
+	mov	ax, [savedfilename + 12]	; Date
+	stosw		; 16
+	mov	ax, [savedfilename + 14]	; Time
+	stosw		; 18
+	mov	ax, [mklostfndclust]
+	stosw		; 1A
+	xor	ax, ax
+	stosw		; 1C
+	stosw		; 1E
+	mov	ax, [bp - 2]
+	mov	dx, [bp - 4]
+	call	diskwrite0
+	ret
+
+.nbad	jmp	newbadsectors
+.mklostfnd_scan:
+	push	ax
+	push	dx
+	call	diskread0
+	jc	.nbad
+	pop	dx
+	pop	ax
+	xor	di, di
+.loops	cmp	[es:di], byte 0
+	je	.ends1
+	test	[es:di + 12], byte 10h
+	jne	.ndir
+	push	di
+	mov	cx, 11
+	mov	si, lostfnd
+	repe	cmpsb
+	pop	di
+	je	.founds
+.ndir	cmp	[es:di], byte 0E5h
+	jne	.shl
+	call	rslot
+.shl	mov	bx, [bp - 10]
+	inc	bx
+	mov	[bp - 10], bx
+	cmp	bx, [bp - 16]
+	je	.ends2
+	add	di, 16
+	mov	cx, [wordsperchunk]
+	shl	cx, 1
+	cmp	di, cx
+	jb	.loops
+	add	ax, [sectsperchunk]
+	adc	dx, 0
+	jmp	.mklostfnd_scan
+.founds	xor	dx, dx
+	mov	ax, [es:di + 1Ah]
+	cmp	[fattype], byte 16
+	jbe	.found6
+	mov	dx, [es:di + 14h]
+.found6	mov	[mklostfndclust], ax
+	mov	[mklostnfdclust + 2], dx
+	clc
+	ret
+.ends1	call	rslot
+.ends2	stc
+	ret
+.rslot	cmp	[bp - 2], cx
+	jne	.shl
+	cmp	[bp - 4], cx
+	jne	.shl
+	mov	[bp - 2], ax
+	mov	[bp - 4], dx
+	mov	[bp - 6], di
+	mov	bx, [bp - 10]
+	mov	[bp - 8], bx
+	ret
+
+.initcluster:
+	push	es
+	mov	es, [buf4seg]
+	mov	si, .initcluster0
+	call	initdircluster
+	pop	es
+	ret
+.initcluster0:
+	;TODO get date + time
+	mov	ax, '. '
+	mov	cx, [mklostfndclust]
+	mov	bx, [mklostfndclust + 2]
+	call	generatedotsdirectoryentry
+	mov	ax, '..'
+	mov	cx, [rootclust]		; TODO does FAT32 want 0 here?
+	mov	bx, [rootclust + 2]
+	call	generatedotsdirectoryentry
+	ret
+
+;	Allocates and initializes a directory cluster
+;	es = buffer, si = 0 chunk initializer argument
+;	returns DX:AX = cluster
+;	Ordered writes: zeros from back to front to avoid causing damage if interrupted
+;	We need this due to an LKNL bug.
+initdircluster:
+	call	invalidatenextcluster
+	mov	dx, 0FFFh
+	mov	ah, 0FFh
+	mov	al, [descriptor]
+	call	alloccluster
+	push	ax
+	push	dx
+	mov	cx, [wordsperchunk]
+	xor	ax, ax
+	xor	di, di
+	rep	stosw
+	xor	dx, dx
+	mov	ax, [sectspercluster]
+	div	word [sectsperchunk]
+	xchg	ax, cx
+	pop	dx
+	pop	ax
+	push	ax
+	push	dx
+	push	cx
+	push	si
+	call	sectortocluster
+	pop	si
+	pop	cx
+	dec	cx
+	jz	.last
+.next	add	ax, cx		; Trick: cannot actually overflow
+	push	ax
+	push	dx
+	push	si
+	push	cx
+	call	diskwrite0
+	pop	cx
+	pop	si
+	pop	dx
+	pop	ax
+	dec	cx
+	jnz	.next
+.last	xor	di, di
+	mov	bx, ax
+	mov	cx, dx
+	pop	dx		; Ugly. Ugly.
+	pop	ax		; Need to pass cluster in DX:AX to SI
+	push	ax		; but need to save sector
+	push	dx
+	push	bx
+	push	cx
+	call	si
+	pop	dx
+	pop	ax
+	call	diskwrite0
+	pop	dx
+	pop	ax
+	call	invalidatenextcluster
+	ret
 	
 	; Entry point; DX:AX = base cluster no, DI = offset
 	; Result in CH; destroys everything but DI and ES
@@ -3233,7 +3549,7 @@ scanbitsclust:
 .retouter:	
 	add	sp, 4
 	pop	bp
-	ret
+	ret	2
 .xms	int3	;TODO fetch from XMS
 .fault	int3	;FIXME
 
@@ -3482,6 +3798,11 @@ isendchainagnostic:
 .ok	clc
 	ret
 .no	stc
+	ret
+
+totalfileinc:
+	add	[totalfiles], word 1
+	adc	[totalfiles + 2], word 0
 	ret
 
 ; FAT12 has entries that span sectors but we don't play that game; we loaded the whole FAT in that case
@@ -3827,6 +4148,7 @@ reservednames	db	"AUX     "
 		db	"LPT8    "
 		db	"LPT9    "
 		db	0
+lostfnd		db	"LOST    FND"
 
 msg_usage	db	'SSDSCAN pre-alpha unusable', 13, 10
 		db	'Usage: SSDSCAN DRIVE: [/F] [/C] [/D]', 13, 10
@@ -3890,8 +4212,9 @@ msg_2bigfile	db	" exceeds 4GB by traversal. In the vain hope", 13, 10
 msg_rootbadsect	db	"Bad sector encountered in root directory", 13, 10, '$'
 msg_replacer	db	"New bad sector encountered reading SSD; advise immediate replacement", 13, 10, '$'
 msg_replace	db	"Bad sector encountered writing to SSD; advise immediate replacement", 13, 10, '$'
-msg_outofspace	db	"Ran out of space repairing disk, free some up.", 13, 10
-		db	"The file system should be good enough to move a file off the disk.", 13, 10, '$'
+msg_outofslots	db	"Ran out of root directory entries, free some up.", 13, 10
+msg_outofspace	db	"Ran out of space repairing disk, free some up.", 13, 10, '$'
+msg_goodenuf	db	"The file system should be good enough to move a file off the disk.", 13, 10, '$'
 
 	align	16, db 0		; Everything depends on _bss being aligned!
 
@@ -3944,7 +4267,7 @@ firstclustsect	resb	4
 zerothclustsect	resb	4		; Optimization hack: direct multiply and add to get sector
 highestclust	resb	4
 clustinbuffer	resb	4
-		resb	4
+totalfiles	resb	4
 
 rootdirsects	resb	2
 bytesperclust	resb	2
@@ -3961,6 +4284,11 @@ fatinbuf	resb	4
 fatinbitmask	resb	4
 bitmasklen	resb	2
 wordsperchunk	resb	2
+
+filesfound	resb	4
+		resb	4
+mklostfndclust	resb	4
+		resb	4
 
 savedfilename	resb	16		; Saved file name and time (keep me on bottom)
 
@@ -3985,3 +4313,4 @@ opflag2_7305	equ 2
 opflag2_ebpb	equ 4
 opflag2_cbf	equ 8
 opflag2_rclust	equ 16
+opflag2_tbuf4	equ 32
