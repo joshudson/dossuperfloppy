@@ -326,7 +326,7 @@ stage_media_descriptor:
 	jnz	.impossible3
 	call	.fixup
 	mov	[sectsperclust], ax	; Number of sectors per cluster after applying logical sectored fat
-	mul	[bytespersector]	; Cannot overflow
+	mul	word [bytespersector]	; Cannot overflow
 	mov	[bytesperclust], ax
 	xor	dx, dx
 	mov	ax, [es:0Eh]
@@ -466,10 +466,10 @@ stage_media_descriptor:
 	jae	.f16
 	mov	[fattype], byte 12
 	jmp	.gftyp
-.f16	call	validhddescriptor
+.f16	call	validatehddescriptor
 	mov	[fattype], byte 16
 	jmp	.gftyp
-.f32	call	validhddescriptor
+.f32	call	validatehddescriptor
 	mov	[fattype], byte 32
 .gftyp	mov	bl, [es:015h]
 	mov	[descriptor], bl
@@ -1324,10 +1324,10 @@ stage_fat:
 	call	checkmark
 
 	;Count up number of (non-empty) files in the FS
-	mov	cx, totalfilesinc
-	push	cx
-	mov	ch, 2
-	call	scanbitsclust
+	;mov	cx, totalfilesinc
+	;push	cx
+	;mov	ch, 2
+	;call	scanbitsclust
 stage_dirwalk:
 	mov	dx, state_dir
 	mov	ah, 9
@@ -1867,7 +1867,7 @@ descendtree:
 	mov	ax, [bp - 42]
 	mov	dx, [bp - 40]
 	jne	.enddirectory
-	mov	[bp - 26], 255
+	mov	[bp - 26], byte 255
 	jmp	.readdirbadsector_recover
 .advanceisnotbad:
 	mov	es, [buf4seg]
@@ -2047,7 +2047,7 @@ descendtree:
 .scannormal_notdirectory_empty:
 	mov	cx, [es:bx + 1Ch]
 	or	cx, [es:bx + 1Eh]
-	jnz	.scannormal_notdirectory_empty0:
+	jnz	.scannormal_notdirectory_empty0
 	mov	dx, query_fixbadlen
 	call	.queryfixentry
 	cmp	al, 'y'
@@ -2135,11 +2135,11 @@ descendtree:
 	pop	ax
 	pop	si
 	jne	.scannormal_enddirectoryv
-	mov	[bp - 26], 255
+	mov	[bp - 26], byte 255
 	jmp	.readdirbadsector_recover
 .scandirtail_notbad:
 	call	isendchainagnostic
-	jc	.scandirtail_enddirectoryv
+	jc	.scannormal_enddirectoryv
 	push	ax
 	push	dx
 	call	getnextcluster
@@ -2276,7 +2276,7 @@ descendtree:
 	mov	dx, [bp - 42h]
 	mov	cx, 0FFFh
 	push	cx
-	mov	ch, FFh
+	mov	ch, 0FFh
 	mov	cl, [descriptor]
 	push	cx
 	call	setclusterinfats
@@ -2297,12 +2297,12 @@ descendtree:
 	add	[bp - 48], cx
 	adc	[bp - 50], word 0
 	jnc	.scannormal_firstnotbad
-	mov	dx, crfile
+	mov	dx, out_crfile
 	mov	ah, 9
 	int	21h
 	pop	bx
 	mov	es, [buf2seg]
-	call	.outentry
+	call	.out_entryname
 	mov	dx, msg_2bigfile
 	mov	ah, 9
 	int	21h
@@ -2318,6 +2318,7 @@ descendtree:
 	ja	.scannormal_file_nottooshort
 	cmp	si, [bp - 44]
 	jb	.scannormal_file_tooshort
+.scannormal_file_nottooshort:
 	add	si, [bytesperclust]
 	adc	di, 0
 	jc	.scannormal_file_nottoolong
@@ -2326,8 +2327,8 @@ descendtree:
 	ja	.scannormal_file_toolong
 	cmp	si, [bp - 46]
 	ja	.scannormal_file_toolong
-.scannormal_file_nottoolong
-	jmp	.scannormal_notdirectory_end3:
+.scannormal_file_nottoolong:
+	jmp	.scannormal_notdirectory_end3
 .scannormal_file_tooshort:
 .scannormal_file_toolong:
 	mov	es, [buf2seg]
@@ -2335,7 +2336,7 @@ descendtree:
 	test	[bp - 9], byte 4
 	jnz	.scannormal_file_setlength
 	mov	dx, query_fixbadlen
-	call	.query_fix_entry
+	call	.queryfixentry
 	cmp	al, 'y'
 	jne	.scannormal_file_nosetlength
 .scannormal_file_setlength:
@@ -2783,8 +2784,8 @@ descendtree:
 	push	ax
 	inc	ax
 	push	ax
-	push	[bp - 40]
-	push	[bp - 42]
+	push	word [bp - 40]
+	push	word [bp - 42]
 .readdirbadsector_childcall:
 	;Generate patchpoint from unwind data
 	mov	ax, [es:si + 8 - 10]
@@ -2845,7 +2846,7 @@ descendtree:
 	mov	bx, [bp - 10]
 	mov	cx, [bp - 12]
 	mov	ax, '. '
-	call	.dotentries_generatebaselineentry
+	call	generatedotdirectoryentry
 	; And this is even dirtier
 	push	si
 	push	es
@@ -2855,8 +2856,8 @@ descendtree:
 	mov	cx, [si - 10]
 	pop	es
 	pop	si
-	mov	ax, '. '
-	call	.dotentries_generatebaselineentry
+	mov	ax, '..'
+	call	generatedotdirectoryentry
 	; From here it's the normal filler
 .recbadsectorfill:
 	mov	ax, 20E5h
@@ -2888,8 +2889,8 @@ recoverbadsector:
 	push	bp
 	mov	bp, sp
 	sub	sp, 16
-	push	[clustinbuffer]
-	push	[clustinbuffer + 2]
+	push	word [clustinbuffer]
+	push	word [clustinbuffer + 2]
 	call	invalidatenextcluster
 	mov	[bp - 4], ax	; BP - 4 = cluster being replaced
 	mov	[bp - 2], dx
@@ -3025,8 +3026,8 @@ recoverbadsector:
 	; return new cluster
 	mov	ax, [bp - 12]
 	mov	dx, [bp - 10]
-	pop	[clustinbuffer + 2]
-	pop	[clustinbuffer]
+	pop	word [clustinbuffer + 2]
+	pop	word [clustinbuffer]
 	mov	sp, bp
 	ret	10
 
@@ -3132,10 +3133,80 @@ mklostfnd:
 	mov	dx, [mklostfndclust + 2]
 	mov	cx, ax
 	or	cx, dx
-	jnz	generatedotdirectoryentry.ret
+	jnz	.ret
+	mov	ax, [rootclust]
+	mov	dx, [rootclust + 2]
+	mov	si, .mklostfnd_match
+	mov	bx, .mklostfnd_popclust
+	mov	cx, .mklostfnd_popentry
+	call	mkdirentry
+	mov	[mklostfndclust], ax
+	mov	[mklostfndclust + 2], dx
+.ret	ret
+.mklostfnd_match:
+	test	[es:di + 12], byte 10h
+	jne	.ret
+	push	di
+	mov	cx, 11
+	mov	si, lostfnd
+	repe	cmpsb
+	pop	di
+	ret
+.mklostfnd_popclust:
+	mov	[mklostfndclust], ax	; We're going to do this via global because initdircluster can't really pass arguments well
+	mov	[mklostfndclust + 2], dx
+	push	es
+	mov	es, [buf4seg]
+	mov	si, .initcluster
+	call	initdircluster
+	pop	es
+	ret
+.initcluster:
+	;TODO get date + time
+	mov	ax, '. '
+	mov	cx, [mklostfndclust]
+	mov	bx, [mklostfndclust + 2]
+	call	generatedotdirectoryentry
+	mov	ax, '..'
+	mov	cx, [rootclust]		; TODO does FAT32 want 0 here?
+	mov	bx, [rootclust + 2]
+	call	generatedotdirectoryentry
+	ret
+.mklostfnd_popentry:
+	mov	si, lostfnd	; Create entry
+	mov	cx, 11
+	rep	movsb
+	mov	al, 10h
+	stosb		; C
+	xor	ax, ax
+	stosw		; E
+	stosw		; 10
+	stosw		; 12
+	mov	ax, [mklostfndclust + 2]
+	stosw		; 14
+	mov	ax, [savedfilename + 12]	; Date
+	stosw		; 16
+	mov	ax, [savedfilename + 14]	; Time
+	stosw		; 18
+	mov	ax, [mklostfndclust]
+	stosw		; 1A
+	xor	ax, ax
+	stosw		; 1C
+	stosw		; 1E
+	mov	ax, [mklostfndclust]
+	mov	dx, [mklostfndclust + 2]
+	ret
+
+	; Makes or matches a directory entry
+	; DX:AX = directory cluster (0 = root)
+	; BX = cluster create logic (no arguments, return passed to CX)
+	; CX = entry create logic (argument: ES:DI = pointer to write to)
+	; SI = match logic	(argument: ES:DI = match to evaluate, must preserve ES,DI,BP)
+	; Returns: cluster if SI matches, otherwise return value of CX
+mkdirentry:
 	push	bp
 	mov	bp, sp
-	sub	sp, 20
+	sub	sp, 26
 	mov	[bp - 2], cx	; empty slot sector low
 	mov	[bp - 4], cx	; empty slot sector high
 	mov	[bp - 6], cx	; empty slot byte offset
@@ -3145,12 +3216,15 @@ mklostfnd:
 	mov	dx, [rootclust + 2]
 	mov	[bp - 12], ax	; Current cluster
 	mov	[bp - 14], dx
+	mov	[bp - 22], si	; match logic
+	mov	[bp - 24], bx	; cluster create logic
+	mov	[bp - 26], cx	; entry create logic
 	mov	es, [buf1seg]
 	mov	ax, [rootclust]
 	mov	dx, [rootclust + 2]
 	mov	cx, ax
 	or	cx, dx
-	jnz	.mklostfnd_clust
+	jnz	.mkentry_clust
 	mov	ax, [reservedsects]
 	mov	cl, [numfats]
 .rpl	add	ax, [sectsperfat]
@@ -3158,16 +3232,14 @@ mklostfnd:
 	loop	.rpl
 	mov	cx, [rootdirentries]
 	mov	[bp - 16], cx	; loop control
-	call	.mklostfnd_scan
-	jnc	.glost		; got it!
+	call	.mkentry_scan
+	jnc	.gentry		; got it!
 	mov	cx, [bp - 10]
 	cmp	cx, [bp - 16]
 	je	.rootdirfull
-.centry	call	.mklostfnd_popentry
-.glost	mov	sp, bp
-	mov	ax, [mklostfndclust]
-	mov	dx, [mklostnfdclust + 2]
-	ret
+.centry	call	.mkentry
+.gentry	mov	sp, bp
+.ret	ret
 
 .rootdirfull:
 	mov	dx, msg_outofslots
@@ -3179,19 +3251,20 @@ mklostfnd:
 	mov	al, 4
 	jmp	exit	; TODO normalize exit codes
 
-.mklostfnd_clust:
+.mkentry_clust:
 	call	invalidatenextcluster
-	mov	ax, [bytespercluster]
+	mov	ax, [bytespersector]
+	mul	word [sectsperclust]
 	mov	cl, 5
 	shr	ax, cl
-	mov	[bp - 16], cx	; loop control
+	mov	[bp - 16], ax	; loop control
 	mov	ax, [bp - 12]
 	mov	dx, [bp - 14]
 	mov	[bp - 18], ax	; current cluster
 	mov	[bp - 20], dx
 .cloop	call	sectorfromcluster
-	call	.mklostfnd_scan
-	jnc	.glost
+	call	.mkentry_scan
+	jnc	.gentry
 	mov	cx, [bp - 10]
 	cmp	cx, [bp - 16]
 	jb	.centry
@@ -3213,7 +3286,7 @@ mklostfnd:
 	mov	al, [descriptor]
 	push	es
 	mov	es, [buf2seg]
-	mov	si, generatedotdirectoryentry.ret
+	mov	si, .ret
 	call	initdircluster
 	push	dx
 	push	ax
@@ -3228,15 +3301,12 @@ mklostfnd:
 	call	sectorfromcluster
 	mov	[bp - 2], ax
 	mov	[bp - 4], dx
-	mov	[bp - 6], 0
-	mov	[bp - 8], 0
+	mov	[bp - 6], word 0
+	mov	[bp - 8], word 0
 	jmp	.centry
 
-.mklostfnd_popentry:
-	or	[opflags + 1], byte opflag2_tbuf4	; Semi-rare case
-	call	.initcluster
-	mov	[mklostfndclust], ax
-	mov	[mklostfndclust + 2], dx
+.mkentry:
+	call	[bp - 24]
 	mov	di, [bp - 6]
 	mov	cx, [bp - 8]
 	cmp	cx, [bp - 16]
@@ -3246,6 +3316,8 @@ mklostfnd:
 	sub	cx, 16
 	cmp	di, cx
 	jb	.isthisslot
+	push	ax
+	push	dx
 	mov	ax, [bp - 2]	; Read in the *next* slot, see if it's good.
 	mov	dx, [bp - 4]
 	add	ax, 1
@@ -3253,6 +3325,7 @@ mklostfnd:
 	push	es
 	push	di
 	mov	es, [buf4seg]
+	or	[opflags + 1], byte opflag2_tbuf4	; rare case
 	push	ax
 	push	dx
 	call	diskread0
@@ -3265,37 +3338,18 @@ mklostfnd:
 	call	diskwrite0
 .b0n	pop	di
 	pop	es
+	pop	dx
+	pop	ax
 	jmp	.ismidslot
 .isthisslot:
 	mov	[es:di + 16], byte 0
 .ismidslot:
-	mov	si, lostfnd	; Create entry
-	mov	cx, 11
-	rep	movsb
-	mov	al, 10h
-	stosb		; C
-	xor	ax, ax
-	stosw		; E
-	stosw		; 10
-	stosw		; 12
-	mov	ax, [mklostfndclust + 2]
-	stosw		; 14
-	mov	ax, [savedfilename + 12]	; Date
-	stosw		; 16
-	mov	ax, [savedfilename + 14]	; Time
-	stosw		; 18
-	mov	ax, [mklostfndclust]
-	stosw		; 1A
-	xor	ax, ax
-	stosw		; 1C
-	stosw		; 1E
-	mov	ax, [bp - 2]
-	mov	dx, [bp - 4]
+	call	[bp - 26]
 	call	diskwrite0
 	ret
 
 .nbad	jmp	newbadsectors
-.mklostfnd_scan:
+.mkentry_scan:
 	push	ax
 	push	dx
 	call	diskread0
@@ -3305,17 +3359,11 @@ mklostfnd:
 	xor	di, di
 .loops	cmp	[es:di], byte 0
 	je	.ends1
-	test	[es:di + 12], byte 10h
-	jne	.ndir
-	push	di
-	mov	cx, 11
-	mov	si, lostfnd
-	repe	cmpsb
-	pop	di
-	je	.founds
-.ndir	cmp	[es:di], byte 0E5h
+	call	[bp - 22]
+	jne	.nmatch
+.nmatch	cmp	[es:di], byte 0E5h
 	jne	.shl
-	call	rslot
+	call	.rslot
 .shl	mov	bx, [bp - 10]
 	inc	bx
 	mov	[bp - 10], bx
@@ -3328,17 +3376,17 @@ mklostfnd:
 	jb	.loops
 	add	ax, [sectsperchunk]
 	adc	dx, 0
-	jmp	.mklostfnd_scan
-.founds	xor	dx, dx
+	jmp	.mkentry_scan
+.founds	cmp	[es:di], byte 0E5h
+	je	.ends1			; Search rule was "empty slot"
+	xor	dx, dx
 	mov	ax, [es:di + 1Ah]
 	cmp	[fattype], byte 16
 	jbe	.found6
 	mov	dx, [es:di + 14h]
-.found6	mov	[mklostfndclust], ax
-	mov	[mklostnfdclust + 2], dx
-	clc
+.found6	clc
 	ret
-.ends1	call	rslot
+.ends1	call	.rslot
 .ends2	stc
 	ret
 .rslot	cmp	[bp - 2], cx
@@ -3350,25 +3398,6 @@ mklostfnd:
 	mov	[bp - 6], di
 	mov	bx, [bp - 10]
 	mov	[bp - 8], bx
-	ret
-
-.initcluster:
-	push	es
-	mov	es, [buf4seg]
-	mov	si, .initcluster0
-	call	initdircluster
-	pop	es
-	ret
-.initcluster0:
-	;TODO get date + time
-	mov	ax, '. '
-	mov	cx, [mklostfndclust]
-	mov	bx, [mklostfndclust + 2]
-	call	generatedotsdirectoryentry
-	mov	ax, '..'
-	mov	cx, [rootclust]		; TODO does FAT32 want 0 here?
-	mov	bx, [rootclust + 2]
-	call	generatedotsdirectoryentry
 	ret
 
 ;	Allocates and initializes a directory cluster
@@ -3389,21 +3418,22 @@ initdircluster:
 	xor	di, di
 	rep	stosw
 	xor	dx, dx
-	mov	ax, [sectspercluster]
+	mov	ax, [sectsperclust]
 	div	word [sectsperchunk]
-	xchg	ax, cx
+	xchg	ax, cx		; cx = chunks per cluster
 	pop	dx
 	pop	ax
 	push	ax
 	push	dx
 	push	cx
 	push	si
-	call	sectortocluster
+	call	sectorfromcluster
 	pop	si
 	pop	cx
 	dec	cx
 	jz	.last
-.next	add	ax, cx		; Trick: cannot actually overflow
+	push	ax
+.next	add	ax, [sectsperchunk]	; Trick: cannot actaully overflow
 	push	ax
 	push	dx
 	push	si
@@ -3415,6 +3445,7 @@ initdircluster:
 	pop	ax
 	dec	cx
 	jnz	.next
+	pop	ax
 .last	xor	di, di
 	mov	bx, ax
 	mov	cx, dx
@@ -3773,7 +3804,7 @@ entrytoblockall:
 	mov	[bp - 1], byte 7	; All same, ergo all changed
 	ret
 
-validatehdescriptor:
+validatehddescriptor:
 	cmp	[descriptor], byte 0F8h
 	je	.ret
 	cmp	[descriptor], byte 0FFh
@@ -3790,14 +3821,14 @@ isendchainagnostic:
 	test	dx, dx
 	jnz	.high
 	cmp	ax, 2
-	jb	.end
+	jb	.yes
 .high	cmp	dx, [highestclust + 2]
-	jb	.ok
+	jb	.no
 	cmp	ax, [highestclust]
-	ja	.end
-.ok	clc
+	jae	.yes
+.no	clc
 	ret
-.no	stc
+.yes	stc
 	ret
 
 totalfileinc:
