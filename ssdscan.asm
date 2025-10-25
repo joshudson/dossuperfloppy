@@ -1324,10 +1324,10 @@ stage_fat:
 	call	checkmark
 
 	;Count up number of (non-empty) files in the FS
-	;mov	cx, totalfilesinc
-	;push	cx
-	;mov	ch, 2
-	;call	scanbitsclust
+	mov	cx, totalfilesinc
+	push	cx
+	mov	ch, 2
+	call	scanbitsclust
 stage_dirwalk:
 	mov	dx, state_dir
 	mov	ah, 9
@@ -1339,10 +1339,28 @@ stage_dirwalk:
 	mov	bx, 1
 
 	call	descendtree
+
+	mov	ax, [totalfiles]
+	mov	dx, [totalfiles + 2]
+	cmp	dx, [foundfiles + 2]
+	jb	stage_recover
+	cmp	ax, [foundfiles]
+	jae	stage_finalize
 	
 	; Next: recover directories
+stage_recover:
+	mov	cx, recoverdirs
+	push	cx
+	mov	ch, 2
+	call	scanbitsclust
 
 	; Next: recover files (all in this stage because % measurement)
+	mov	cx, recoverfiles
+	push	cx
+	mov	ch, 2
+	call	scanbitsclust
+
+stage_finalize:
 	call	checkmark
 
 	mov	al, 0
@@ -2059,8 +2077,8 @@ descendtree:
 .scannormal_notdirectory_empty0:
 	jmp	.skipentry
 .scannormal_notempty:
-	add	[filesfound], word 1
-	adc	[filesfound + 2], word 0
+	add	[foundfiles], word 1
+	adc	[foundfiles + 2], word 0
 	push	bx
 	push	si	
 	push	ax
@@ -3124,6 +3142,174 @@ generatedotdirectoryentry:
 	xor	ax, ax
 	stosw
 	stosw
+	ret
+
+; Checks if target is directory. If so, recovers it
+recoverdirs:
+	push	bp
+	mov	bp, sp
+	sub	sp, 12
+	mov	[bp - 2], dx	; Cluster
+	mov	[bp - 4], ax
+	call	sectorfromcluster
+	mov	es, [buf1seg]
+	call	diskread0
+	mov	cx, [bp - 2]
+	mov	bx, [bp - 4]
+	xor	di, di
+	call	check_dots
+	jz	.found
+	ret
+.foundn	inc	di
+	cmp	di, 49
+	je	.loose
+	mov	dx, [bp - 10]
+	mov	ax, [bp - 12]
+	mov	[bp - 2], dx
+	mov	[bp - 4], ax
+.found	mov	ax, [es:3Ah]
+	xor	dx, dx
+	cmp	[fattype], byte 16
+	jbe	.fat16
+	mov	dx, [es:34h]
+	mov	bx, [es:16h]
+	mov	cx, [es:18h]
+	mov	[bp - 8], bx
+	mov	[bp - 6], cx
+.fat16	mov	[bp - 10], dx
+	mov	[bp - 12], ax
+	push	di
+	call	sectorfromcluster
+	call	diskread0
+	pop	di
+	mov	cx, [bp - 10]
+	mov	bx, [bp - 12]
+	call	check_dots
+	jnz	.loose
+	mov	dx, [bp - 10]
+	mov	ax, [bp - 12]
+	call	getbitsclust
+	cmp	cl, 3
+	je	.foundt
+	cmp	cl, 2
+	je	.foundn
+.loose:	; Recover *this* one as directory
+	call	mklostfnd
+	mov	[bp - 10], dx
+	mov	[bp - 12], ax
+.foundt	mov	dx, [bp - 4]
+	mov	ax, [bp - 2]
+	mov	bx, [bp - 8]
+	mov	cx, [bp - 6]
+	mov	[savedfilename], ax
+	mov	[savedfilename + 2], dx
+	mov	[savedfilename + 4], bx
+	mov	[savedfilename + 6], cx
+	mov	dx, [bp - 10]
+	mov	ax, [bp - 12]
+	mov	bx, matchemptyslot.ret
+	mov	si, matchemptyslot
+	mov	cx, .create
+	call	mkdirentry
+	add	sp, 12	; Tail call into descendtree
+	pop	bp
+	mov	ax, [savedfilename]
+	mov	dx, [savedfilename + 2]
+	mov	si, [savedfilename + 8]
+	mov	di, [savedfilename + 10]
+	mov	bx, [savedfilename + 12]
+	jmp	descendtree
+.create	mov	[savedfilename + 8], ax		; Save location for descendtree
+	mov	[savedfilename + 10], dx
+	mov	[savedfilename + 12], di
+	mov	ax, [savedfilename]
+	mov	dx, [savedfilename + 2]
+	mov	bx, [savedfilename + 4]
+	mov	cx, [savedfilename + 6]
+	mov	[es:di + 14h], dx
+	mov	[es:di + 1Ah], ax
+	mov	[es:di + 16h], bx
+	mov	[es:di + 18h], cx
+	xor	cx, cx
+	mov	[es:di + 0Bh], byte 10h
+	mov	[es:di + 0Ch], cx
+	mov	[es:di + 0Eh], cx
+	mov	[es:di + 10h], cx
+	mov	[es:di + 12h], cx
+	mov	[es:di + 1Ch], cx
+	mov	[es:di + 1Eh], cx
+	lea	si, [di + 11]
+	cmp	[fattype], byte 16
+	ja	recovernamecommon
+	push	ax
+	mov	ax, 'DI'
+	stosw
+	mov	al, 'R'
+	stosb
+	pop	ax
+	jmp	recovernamecommon
+
+recoverfiles:
+	mov	[savedfilename], ax
+	mov	[savedfilename + 2], dx
+	call	mklostfnd
+	mov	bx, matchemptyslot.ret
+	mov	si, matchemptyslot
+	mov	cx, .create
+	jmp	mkdirentry
+.create	mov	ax, [savedfilename]
+	mov	dx, [savedfilename + 2]
+	;TODO get date and time
+	mov	[es:di + 14h], dx
+	mov	[es:di + 1Ah], ax
+	mov	[es:di + 16h], bx
+	mov	[es:di + 18h], cx
+	xor	cx, cx
+	mov	[es:di + 0Bh], byte 10h
+	mov	[es:di + 0Ch], cx
+	mov	[es:di + 0Eh], cx
+	mov	[es:di + 10h], cx
+	mov	[es:di + 12h], cx
+	mov	[es:di + 1Ch], cx
+	mov	[es:di + 1Eh], cx
+	lea	si, [di + 11]
+	cmp	[fattype], byte 16
+	ja	recovernamecommon
+	push	ax
+	mov	ax, 'FI'
+	stosw
+	mov	ax, 'LE'
+	stosw
+	pop	ax
+
+recovernamecommon:
+	cmp	[fattype], byte 16
+	jbe	.fat16
+	xchg	ax, dx
+	call	.hex4
+	xchg	ax, dx
+.fat16	call	.hex4
+	mov	al, ' '
+	mov	cx, si
+	sub	cx, di
+	rep	stosb
+	ret
+.hex4	mov	bx, ax
+	mov	cx, 0404h
+.hex4l	rol	bx, cl
+	mov	al, cl
+	and	al, 15
+	add	al, '0'
+	cmp	al, '9'
+	jb	.hexn
+	add	al, 'A' - '0' + 10
+.hexn	stosb
+	dec	ch
+	jnz	.hex4l
+	ret
+
+matchemptyslot:
+	cmp	[es:di], byte 0E5h
 .ret	ret
 
 	;mklostfnd: gets or creates LOST.FND
@@ -3344,7 +3530,11 @@ mkdirentry:
 .isthisslot:
 	mov	[es:di + 16], byte 0
 .ismidslot:
+	push	ax
+	push	dx
 	call	[bp - 26]
+	pop	dx
+	pop	ax
 	call	diskwrite0
 	ret
 
@@ -3411,6 +3601,10 @@ initdircluster:
 	mov	ah, 0FFh
 	mov	al, [descriptor]
 	call	alloccluster
+	add	[totalfiles], word 1
+	adc	[totalfiles + 2], word 0
+	add	[foundfiles], word 1
+	adc	[foundfiles + 2], word 0
 	push	ax
 	push	dx
 	mov	cx, [wordsperchunk]
@@ -3462,6 +3656,11 @@ initdircluster:
 	pop	dx
 	pop	ax
 	call	invalidatenextcluster
+	ret
+
+totalfilesinc:
+	add	[totalfiles], word 1
+	adc	[totalfiles + 2], word 0
 	ret
 	
 	; Entry point; DX:AX = base cluster no, DI = offset
@@ -3539,6 +3738,8 @@ bitsclustcommon:
 	; Locate all entries matching a pattern
 	; Arguments: CH = pattern, stack = callback (called with bp + 4 = address of callback)
 	; Destroys all registers other than CS,DS,SS,BP
+	; Are we having fun yet?
+	; stage_recover -> scanbitsclust -> recoverdirs -> descendtree -> recoverbadsector -> alloccluster -> scanbitsclust
 scanbitsclust:
 	push	bp
 	mov	bp, sp
@@ -4316,7 +4517,7 @@ fatinbitmask	resb	4
 bitmasklen	resb	2
 wordsperchunk	resb	2
 
-filesfound	resb	4
+foundfiles	resb	4
 		resb	4
 mklostfndclust	resb	4
 		resb	4
