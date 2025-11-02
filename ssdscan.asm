@@ -1120,7 +1120,7 @@ stage_fat:
 	jmp	.clustdone	; We won't allocate this cluster because of how cluster alloc works
 .notfree:
 	sub	[freeclust], word 1
-	sbb	[freeclust + 2], word 1
+	sbb	[freeclust + 2], word 0
 	call	[isbadblock]
 	jne	.notbadblock
 	mov	ax, [bp - 6]
@@ -1367,7 +1367,9 @@ stage_finalize:
 	;TODO fat info sector check for FAT32
 
 .ninfo	test	[opflags], byte opflag_d
-	jz	exit0
+	jz	.done
+	mov	es, [buf1seg]
+	xor	di, di
 	mov	si, dsc_totalfiles
 	mov	cx, dsc_usedclust - dsc_totalfiles
 	mov	ax, [totalfiles]
@@ -1385,8 +1387,17 @@ stage_finalize:
 	mov	ax, [freeclust]
 	mov	dx, [freeclust + 2]
 	call	gendigitslblcx
-
-exit0:	mov	al, 0
+	mov	al, '$'
+	stosb
+	push	ds
+	push	es
+	pop	ds
+	xor	dx, dx
+	mov	ah, 9
+	int	21h
+	pop	ds
+.done	call	newline
+	mov	al, 0
 exit:	mov	ah, 4Ch
 	; There will be free XMS, etc. here
 	int	21h
