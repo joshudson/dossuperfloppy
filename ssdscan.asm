@@ -1342,10 +1342,10 @@ stage_dirwalk:
 	mov	ax, [totalfiles]
 	mov	dx, [totalfiles + 2]
 	cmp	dx, [foundfiles + 2]
-	jb	stage_recover
+	ja	stage_recover
 	cmp	ax, [foundfiles]
-	jae	stage_finalize
-	
+	jbe	stage_finalize
+
 	; Next: recover directories
 stage_recover:
 	mov	cx, recoverdirs
@@ -1353,8 +1353,15 @@ stage_recover:
 	mov	ch, 2
 	call	scanbitsclust
 
+	mov	ax, [totalfiles]
+	mov	dx, [totalfiles + 2]
+	cmp	dx, [foundfiles + 2]
+	ja	.files
+	cmp	ax, [foundfiles]
+	jbe	stage_finalize
+
 	; Next: recover files (all in this stage because % measurement)
-	mov	cx, recoverfiles
+.files	mov	cx, recoverfiles
 	push	cx
 	mov	ch, 2
 	call	scanbitsclust
@@ -2122,7 +2129,7 @@ descendtree:
 	jz	.scanbits_free
 	test	ch, 1
 	jnz	.scanbits_xlink
-	mov	cl, 2
+	mov	cl, 1
 	pop	dx
 	pop	ax
 	push	ax
@@ -2262,9 +2269,9 @@ descendtree:
 	pop	es
 	pop	ds
 	mov	cx, [es:bx + 16h]
-	mov	[savedfilename + 12], cx	; DIR created date
+	mov	[savedfilename + 12], cx	; DIR created time
 	mov	cx, [es:bx + 18h]
-	mov	[savedfilename + 14], cx	; DIR created time
+	mov	[savedfilename + 14], cx	; DIR created date
 	mov	es, [buf4seg]
 	add	si, 10
 	mov	[es:si], ax
@@ -3192,13 +3199,17 @@ recoverdirs:
 	call	sectorfromcluster
 	mov	es, [buf1seg]
 	call	diskread0
-	jc	.ret
+	jc	.nope
 	mov	cx, [bp - 2]
 	mov	bx, [bp - 4]
 	xor	di, di
 	call	check_dots
 	jz	.found
-.ret	ret
+.nope	mov	sp, bp
+	pop	bp
+	pop	dx
+	pop	ax
+	ret
 .foundn	inc	di
 	cmp	di, 49
 	je	.foundc
@@ -3351,9 +3362,13 @@ recoverdirs:
 	mov	si, savedfilename + 8
 	cmp	[fattype], byte 17
 	sbb	di, 0		; !FAT32: si -= 1
+	push	es
+	push	ds
+	pop	es
 	call	recovernamedir
 	mov	al, '$'
 	stosb
+	pop	es
 	mov	dx, savedfilename
 	mov	ah, 9
 	int	21h
@@ -3362,8 +3377,14 @@ recoverdirs:
 recoverfiles:
 	push	ax
 	push	dx
+	push	ax
+	mov	ax, cx
+	call	outax
+	pop	ax
 	mov	di, savedfilename
 	mov	si, savedfilename + 8
+	push	ds
+	pop	es
 	call	recovernamefile
 	mov	al, '$'
 	stosb
@@ -3398,9 +3419,7 @@ recoverfiles:
 	jmp	mkdirentry
 .create	mov	ax, [savedfilename]
 	mov	dx, [savedfilename + 2]
-	;TODO get date into CX and time into BX
-	xor	bx, bx
-	xor	cx, cx
+	call	getdatetime
 	mov	[es:di + 14h], dx
 	mov	[es:di + 1Ah], ax
 	mov	[es:di + 16h], bx
@@ -3454,12 +3473,12 @@ recovernamecommon:
 .hex4	mov	bx, ax
 	mov	cx, 0404h
 .hex4l	rol	bx, cl
-	mov	al, cl
+	mov	al, bl
 	and	al, 15
 	add	al, '0'
 	cmp	al, '9'
 	jb	.hexn
-	add	al, 'A' - '0' + 10
+	add	al, 'A' - '0' - 10
 .hexn	stosb
 	dec	ch
 	jnz	.hex4l
@@ -3468,7 +3487,7 @@ recovernamecommon:
 queryrecovercommon:
 	mov	cx, state_dir
 	mov	dx, query_recq
-	jmp	queryfixyn
+	jmp	queryfixynpostcr
 
 matchemptyslot:
 	cmp	[es:di], byte 0E5h
@@ -3482,6 +3501,9 @@ mklostfnd:
 	mov	cx, ax
 	or	cx, dx
 	jnz	.ret
+	call	getdatetime
+	mov	[savedfilename + 12], cx	; Time
+	mov	[savedfilename + 14], bx	; Date
 	mov	ax, [rootclust]
 	mov	dx, [rootclust + 2]
 	mov	si, .mklostfnd_match
@@ -3532,9 +3554,9 @@ mklostfnd:
 	stosw		; 12
 	mov	ax, [mklostfndclust + 2]
 	stosw		; 14
-	mov	ax, [savedfilename + 12]	; Date
+	mov	ax, [savedfilename + 12]	; Time
 	stosw		; 16
-	mov	ax, [savedfilename + 14]	; Time
+	mov	ax, [savedfilename + 14]	; Date
 	stosw		; 18
 	mov	ax, [mklostfndclust]
 	stosw		; 1A
@@ -3823,6 +3845,38 @@ initdircluster:
 totalfilesinc:
 	add	[totalfiles], word 1
 	adc	[totalfiles + 2], word 0
+	ret
+
+	; Returns: Date in CX, time in BX, preserves all other registers
+getdatetime:
+	push	ax
+	push	dx
+	mov	ah, 2Ch
+	int	21h
+	mov	al, ch
+	mov	ch, cl
+	mov	cl, 5
+	shl	ax, cl
+	or	al, ch
+	mov	cl, 6
+	shl	ax, cl
+	shr	dh, 1
+	or	al, dh
+	push	ax	; TIME
+	mov	ah, 2Ah
+	int	21h
+	xchg	ax, cx
+	mov	cl, 4
+	shl	ax, cl
+	or	al, dh
+	mov	ax, 5
+	shl	ax, cl
+	or	al, dl
+	xchg	ax, cx
+	pop	bx
+	pop	bx
+	pop	dx
+	pop	ax
 	ret
 	
 	; Entry point; DX:AX = base cluster no, DI = offset
@@ -4182,9 +4236,7 @@ validatehddescriptor:
 	cmp	dl, byte 0FFh
 	jne	.error
 .ret	ret
-.error	mov	ax, dx
-	call	outax
-	mov	ah, 9
+.error	mov	ah, 9
 	mov	dx, msg_hdbaddesc
 	int	21h
 	mov	al, 04h
