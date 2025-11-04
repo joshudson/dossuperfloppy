@@ -3092,8 +3092,8 @@ recoverbadsector:
 
 	;Allocate cluster. ES = buffer, DX:AX = value to set it to. Trashes all registers except ES, BP
 alloccluster:
+	push	dx	; See setclusterinfats
 	push	ax
-	push	dx
 	push	es
 	mov	ch, 0
 	mov	ax, .found
@@ -3102,11 +3102,12 @@ alloccluster:
 	mov	dx, msg_outofspace
 	mov	ah, 9
 	int	21h
-	mov	ax, 4C03h	; TODO Normalize exit codes
-	int	21h
+	mov	al, 3		; TODO Normalize exit codes
+	jmp	exit
 .found	mov	sp, bp		; longjmp!
 	pop	bp
 	pop	cx		; Trash
+	pop	cx
 	pop	es
 	;DX:AX is allocated cluster
 	;on stack is cluster to point it to
@@ -3210,7 +3211,7 @@ recoverdirs:
 	pop	dx
 	pop	ax
 	ret
-.foundn	inc	di
+.foundn	inc	di	; TODO still very broken
 	cmp	di, 49
 	je	.foundc
 	mov	dx, [bp - 10]
@@ -3361,7 +3362,7 @@ recoverdirs:
 .pname	mov	di, savedfilename
 	mov	si, savedfilename + 8
 	cmp	[fattype], byte 17
-	sbb	di, 0		; !FAT32: si -= 1
+	sbb	si, 0		; !FAT32: si -= 1
 	push	es
 	push	ds
 	pop	es
@@ -3377,10 +3378,6 @@ recoverdirs:
 recoverfiles:
 	push	ax
 	push	dx
-	push	ax
-	mov	ax, cx
-	call	outax
-	pop	ax
 	mov	di, savedfilename
 	mov	si, savedfilename + 8
 	push	ds
@@ -3425,7 +3422,7 @@ recoverfiles:
 	mov	[es:di + 16h], bx
 	mov	[es:di + 18h], cx
 	xor	cx, cx
-	mov	[es:di + 0Bh], byte 10h
+	mov	[es:di + 0Bh], byte 20h
 	mov	[es:di + 0Ch], cx
 	mov	[es:di + 0Eh], cx
 	mov	[es:di + 10h], cx
@@ -3510,11 +3507,11 @@ mklostfnd:
 	mov	bx, .mklostfnd_popclust
 	mov	cx, .mklostfnd_popentry
 	call	mkdirentry
-	mov	[mklostfndclust], ax
-	mov	[mklostfndclust + 2], dx
 .ret	ret
 .mklostfnd_match:
-	test	[es:di + 12], byte 10h
+	mov	bl, [es:di + 12]
+	and	bl, 10h
+	cmp	bl, 10h
 	jne	.ret
 	push	di
 	mov	cx, 11
@@ -3523,19 +3520,14 @@ mklostfnd:
 	pop	di
 	ret
 .mklostfnd_popclust:
-	mov	[mklostfndclust], ax	; We're going to do this via global because initdircluster can't really pass arguments well
-	mov	[mklostfndclust + 2], dx
-	push	es
-	mov	es, [buf4seg]
 	mov	si, .initcluster
-	call	initdircluster
-	pop	es
-	ret
+	jmp	initdircluster
 .initcluster:
-	;TODO get date + time
+	mov	[mklostfndclust], ax
+	mov	cx, ax
+	mov	[mklostfndclust + 2], dx
+	mov	bx, dx
 	mov	ax, '. '
-	mov	cx, [mklostfndclust]
-	mov	bx, [mklostfndclust + 2]
 	call	generatedotdirectoryentry
 	mov	ax, '..'
 	mov	cx, [rootclust]		; TODO does FAT32 want 0 here?
@@ -3547,12 +3539,14 @@ mklostfnd:
 	mov	cx, 11
 	rep	movsb
 	mov	al, 10h
-	stosb		; C
+	stosb		; B
 	xor	ax, ax
+	stosw		; C
 	stosw		; E
 	stosw		; 10
 	stosw		; 12
-	mov	ax, [mklostfndclust + 2]
+	mov	dx, [mklostfndclust + 2]
+	mov	ax, dx
 	stosw		; 14
 	mov	ax, [savedfilename + 12]	; Time
 	stosw		; 16
@@ -3564,12 +3558,11 @@ mklostfnd:
 	stosw		; 1C
 	stosw		; 1E
 	mov	ax, [mklostfndclust]
-	mov	dx, [mklostfndclust + 2]
 	ret
 
 	; Makes or matches a directory entry
 	; DX:AX = directory cluster (0 = root)
-	; BX = cluster create logic (no arguments, return passed to CX)
+	; BX = cluster create logic (no arguments)
 	; CX = entry create logic (argument: ES:DI = pointer to write to)
 	; SI = match logic	(argument: ES:DI = match to evaluate, must preserve ES,DI,BP)
 	; Returns: cluster if SI matches, otherwise return value of CX
@@ -3577,21 +3570,18 @@ mkdirentry:
 	push	bp
 	mov	bp, sp
 	sub	sp, 26
+	mov	[bp - 26], cx	; entry create logic
+	xor	cx, cx
 	mov	[bp - 2], cx	; empty slot sector low
 	mov	[bp - 4], cx	; empty slot sector high
 	mov	[bp - 6], cx	; empty slot byte offset
 	mov	[bp - 8], cx	; empty slot counter
 	mov	[bp - 10], cx	; counter
-	mov	ax, [rootclust]
-	mov	dx, [rootclust + 2]
 	mov	[bp - 12], ax	; Current cluster
 	mov	[bp - 14], dx
 	mov	[bp - 22], si	; match logic
 	mov	[bp - 24], bx	; cluster create logic
-	mov	[bp - 26], cx	; entry create logic
 	mov	es, [buf1seg]
-	mov	ax, [rootclust]
-	mov	dx, [rootclust + 2]
 	mov	cx, ax
 	or	cx, dx
 	jnz	.mkentry_clust
@@ -3609,6 +3599,7 @@ mkdirentry:
 	je	.rootdirfull
 .centry	call	.mkentry
 .gentry	mov	sp, bp
+	pop	bp
 .ret	ret
 
 .rootdirfull:
@@ -3651,9 +3642,6 @@ mkdirentry:
 	mov	[bp - 10], word 0
 	jmp	.cloop
 .newcluster:
-	mov	dx, 0FFFh
-	mov	ah, 0FFh
-	mov	al, [descriptor]
 	push	es
 	mov	es, [buf2seg]
 	mov	si, .ret
@@ -3673,6 +3661,8 @@ mkdirentry:
 	mov	[bp - 4], dx
 	mov	[bp - 6], word 0
 	mov	[bp - 8], word 0
+	xor	ax, ax
+	xor	dx, dx
 	jmp	.centry
 
 .mkentry:
@@ -3680,22 +3670,17 @@ mkdirentry:
 	mov	di, [bp - 6]
 	mov	cx, [bp - 8]
 	cmp	cx, [bp - 16]
-	je	.ismidslot
+	jne	.ismidslot
 	mov	cx, [wordsperchunk]
 	shl	cx, 1
 	sub	cx, 16
 	cmp	di, cx
 	jb	.isthisslot
-	push	ax
-	push	dx
 	mov	ax, [bp - 2]	; Read in the *next* slot, see if it's good.
 	mov	dx, [bp - 4]
-	add	ax, 1
+	add	ax, [sectsperchunk]
 	adc	dx, 0
-	push	es
 	push	di
-	mov	es, [buf4seg]
-	or	[opflags + 1], byte opflag2_tbuf4	; rare case
 	push	ax
 	push	dx
 	call	diskread0
@@ -3707,19 +3692,38 @@ mkdirentry:
 	mov	[es:0], byte 0
 	call	diskwrite0
 .b0n	pop	di
-	pop	es
-	pop	dx
-	pop	ax
-	jmp	.ismidslot
+	jmp	.ismidslot2
 .isthisslot:
+	call	.mkentryreadthis
 	mov	[es:di + 16], byte 0
+	jmp	.ismidslot2
 .ismidslot:
+	call	.mkentryreadthis
+.ismidslot2:
 	push	ax
 	push	dx
 	call	[bp - 26]
+	pop	bx
+	pop	cx
+	push	ax
+	push	dx
+	xchg	ax, cx
+	mov	dx, bx
+	call	diskwrite0
 	pop	dx
 	pop	ax
-	call	diskwrite0
+	ret
+.mkentryreadthis:
+	mov	ax, [bp - 2]	; Read in storage slot (checking if it's still in buffer is too hard)
+	mov	dx, [bp - 4]
+	push	ax
+	push	dx
+	push	di
+	call	diskread0
+	pop	di
+	pop	dx
+	pop	ax
+	jc	.nbad
 	ret
 
 .nbad	jmp	newbadsectors
@@ -3743,7 +3747,7 @@ mkdirentry:
 	mov	[bp - 10], bx
 	cmp	bx, [bp - 16]
 	je	.ends2
-	add	di, 16
+	add	di, 32
 	mov	cx, [wordsperchunk]
 	shl	cx, 1
 	cmp	di, cx
@@ -3763,16 +3767,17 @@ mkdirentry:
 .ends1	call	.rslot
 .ends2	stc
 	ret
-.rslot	cmp	[bp - 2], cx
-	jne	.shl
+.rslot	xor	cx, cx
+	cmp	[bp - 2], cx
+	jne	.rslotr
 	cmp	[bp - 4], cx
-	jne	.shl
+	jne	.rslotr
 	mov	[bp - 2], ax
 	mov	[bp - 4], dx
 	mov	[bp - 6], di
 	mov	bx, [bp - 10]
 	mov	[bp - 8], bx
-	ret
+.rslotr	ret
 
 ;	Allocates and initializes a directory cluster
 ;	es = buffer, si = 0 chunk initializer argument
@@ -3780,6 +3785,7 @@ mkdirentry:
 ;	Ordered writes: zeros from back to front to avoid causing damage if interrupted
 ;	We need this due to an LKNL bug.
 initdircluster:
+	push	si
 	call	invalidatenextcluster
 	mov	dx, 0FFFh
 	mov	ah, 0FFh
@@ -3804,9 +3810,7 @@ initdircluster:
 	push	ax
 	push	dx
 	push	cx
-	push	si
 	call	sectorfromcluster
-	pop	si
 	pop	cx
 	dec	cx
 	jz	.last
@@ -3829,6 +3833,7 @@ initdircluster:
 	mov	cx, dx
 	pop	dx		; Ugly. Ugly.
 	pop	ax		; Need to pass cluster in DX:AX to SI
+	pop	si		; Preserved at start
 	push	ax		; but need to save sector
 	push	dx
 	push	bx
@@ -3873,7 +3878,6 @@ getdatetime:
 	shl	ax, cl
 	or	al, dl
 	xchg	ax, cx
-	pop	bx
 	pop	bx
 	pop	dx
 	pop	ax
@@ -4777,4 +4781,3 @@ opflag2_7305	equ 2
 opflag2_ebpb	equ 4
 opflag2_cbf	equ 8
 opflag2_rclust	equ 16
-opflag2_tbuf4	equ 32
