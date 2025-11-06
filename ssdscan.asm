@@ -136,6 +136,20 @@ _start:
 	int	21h
 .go	mov	[opflags], bx
 	mov	[disk], dl
+	mov	bl, dl
+	mov	ax, 440Dh
+	mov	cx, 0867h
+	mov	dx, savedaccessflag
+	int	21h
+	jnc	.sflag
+	mov	dx, endchainlow	; Unlock disk in case it's broken
+	mov	bl, [disk]	; Only needed on FreeDOS and DOS 4.
+	mov	ax, 440Dh	; endchainlow is currently 0 which is what we want
+	mov	cx, 0847h
+	int	21h
+.sflag:	mov	ah, 0Dh
+	int	21h		; Flush all buffers: we want a cleanly written FS.
+
 	;TODO disable ^C handler and IO error handler as these will permanently leak memory
 
 stage_media_descriptor:
@@ -161,7 +175,8 @@ stage_media_descriptor:
 	mov	[es:16384], byte 0A0h
 	xor	dx, dx
 	xor	cx, cx
-	call	diskread0
+	xor	bx, bx
+	call	diskread
 	jnc	.read0
 .error0	xor	dx, dx
 	xor	cx, cx
@@ -189,10 +204,12 @@ stage_media_descriptor:
 	mov	[es:4096], byte 0
 	mov	[es:8192], byte 0
 	mov	[es:16384], byte 0
+	call	invalidatesector
 	xor	dx, dx
 	xor	cx, cx
 	xor	ax, ax
-	call	diskread0
+	xor	bx, bx
+	call	diskread
 	jc	.errorZ
 	mov	bx, 16384
 .sz2	cmp	[es:bx], byte 0
@@ -473,6 +490,11 @@ stage_media_descriptor:
 .f32	call	validatehddescriptor
 	mov	[fattype], byte 32
 .gftyp	mov	[descriptor], dl
+	cmp	dl, 0F7h
+	jne	.gftyp2
+	mov	dl, 0FFh
+.gftyp2	mov	dh, 0FFh
+	mov	[endchainlow], dx
 	; We've finished extracting all information from the boot sector
 
 	mov	bx, 1			; Find sectors per chunk
@@ -777,12 +799,8 @@ initpools:
 .mdscn	push	cx
 	push	si
 	push	di
-	push	dx
-	push	ax
 	mov	es, [buf1seg + si]
 	call	diskread0
-	pop	ax
-	pop	dx
 	pop	di
 	pop	si
 	pop	cx
@@ -1049,7 +1067,7 @@ stage_fat:
 	mov	al, 4		; TODO normalize exit codes
 	jmp	exit		; Can't risk continuing as this could destroy entire FS
 .fxdesc	mov	ah, 0FFh
-	mov	dx, 0FFFFh
+	mov	dx, 0FFFh
 	mov	al, [descriptor]
 	call	entrytoblockall
 .isdesc	inc	di
@@ -1093,8 +1111,7 @@ stage_fat:
 	jne	.endchain		; We can survive not fixing this one
 .setendchain:
 	mov	dx, 0FFFh
-	mov	al, [descriptor]
-	mov	ah, dh
+	mov	ax, [endchainlow]
 	call	entrytoblockall
 .endchain:
 	mov	ax, [bp - 6]
@@ -1199,18 +1216,21 @@ stage_fat:
 	mov	di, ax
 	sub	di, [bp - 6]
 	mov	dx, 0FFFh
-	mov	ah, 0FFh
-	mov	al, [descriptor]
+	mov	ax, [endchainlow]
 	call	entrytoblockall
 	pop	di
 	jmp	.notoverlarge
 .fixallocfarbefore:
 	push	es
 	mov	es, [buf4seg]	; Load prior into buf4 and set end of chain
+	push	ax
+	push	dx
+	call	invalidatesector
+	pop	dx
+	pop	ax
 	mov	bx, 0FFFh
 	push	bx
-	mov	bh, 0FFh
-	mov	bl, [descriptor]
+	mov	bx, [endchainlow]
 	push	bx
 	call	setclusterinfats
 	pop	es
@@ -1232,8 +1252,7 @@ stage_fat:
 	; I spent a long time trying to find an algorithm that worked. I found one, but it's ridiculous
 	; and I'm not doing it. Truncate one of the files here.
 	mov	dx, 0FFFh
-	mov	ah, 0FFh
-	mov	al, [descriptor]
+	mov	ax, [endchainlow]
 	call	entrytoblockall
 .nofixxlink:
 	jmp	.clustdonenotfree
@@ -1298,16 +1317,12 @@ stage_fat:
 	add	ax, [reservedsects]
 	adc	dx, 0
 .loopmorefats:
-	push	ax
-	push	dx
 	push	cx
 	mov	bx, cx
 	shl	bx, 1
 	mov	es, [buf1seg + bx]
 	call	diskread0
 	pop	cx
-	pop	dx
-	pop	ax
 	jnc	.loopmorenotbad
 	mov	bl, 1
 	shl	bl, cl
@@ -1406,7 +1421,17 @@ stage_finalize:
 .done	call	newline
 	mov	al, 0
 exit:	mov	ah, 4Ch
+	push	ax
+	cmp	[savedaccessflag], word 0
+	jne	.nac
+	mov	dx, savedaccessflag	; Restore prev. access: DOS data structures aren't initialized
+	mov	bl, [disk]
+	mov	ax, 440Dh
+	mov	cx, 0847h
+	int	21h
+.nac:	
 	; There will be free XMS, etc. here
+	pop	ax
 	int	21h
 
 newbadsectors:
@@ -1536,12 +1561,6 @@ outesline:
 	ret
 %endif
 
-invalidatenextcluster:
-	mov	cx, 0FFFFh
-	mov	[clustinbuffer], cx
-	mov	[clustinbuffer + 2], cx
-	ret
-	
 	;Given a cluster number, gets the next cluster number; that is, read fat cluster
 	;Input: DX:AX = cluster, ES=buffer     Output: DX:AX = next cluster
 	;Destroys BX, CX, DI
@@ -1554,11 +1573,7 @@ getnextcluster:
 .worker xor	cx, cx
 	push	di
 .loop	push	cx
-	push	ax
-	push	dx
 	call	diskread0
-	pop	dx
-	pop	ax
 	pop	cx
 	jnc	.found
 	inc	cl
@@ -1714,7 +1729,6 @@ descendtree:
 	;buf2seg = directory buffer
 	;buf3seg = (unused, maybe not allocated)
 	;buf4seg = external stack for descent
-	call	invalidatenextcluster	; TODO may be pushed upwards later
 	mov	bp, sp
 	sub	sp, 50
 	mov	es, [buf4seg]
@@ -1751,8 +1765,13 @@ descendtree:
 	mov	[es:si + 2], dx	; TODO: check if FAT32 wants 0 or cluster for .. to root
 	mov	[es:si + 4], ax	; Current cluster of directory
 	mov	[es:si + 6], dx
+	push	ax
+	push	dx
+	call	invalidatesector	; ES is not sector data
+	pop	dx
+	pop	ax
 	mov	di, 2		; Skip initial . and ..
-	cmp	bx, 1
+	cmp	[bp - 22], word 1
 	jne	.start_isnotroot
 	cmp	ax, [rootclust]
 	jne	.start_isnotroot
@@ -2217,8 +2236,7 @@ descendtree:
 	jne	.scannormal_enddirectoryv
 	mov	cx, 0FFFh
 	push	cx
-	mov	ch, 0FFh
-	mov	cl, [descriptor]
+	mov	cx, [endchainlow]
 	push	cx
 	call	setclusterinfats
 .scannormal_enddirectoryv:
@@ -2335,11 +2353,9 @@ descendtree:
 	mov	dx, [bp - 42h]
 	mov	cx, 0FFFh
 	push	cx
-	mov	ch, 0FFh
-	mov	cl, [descriptor]
+	mov	cx, [endchainlow]
 	push	cx
 	call	setclusterinfats
-	call	invalidatenextcluster	;!!!
 	or	[bp - 9], byte 4
 	jmp	.scannormal_subsequent_endchain
 .scannormal_notdirectory_end3:
@@ -2428,8 +2444,8 @@ descendtree:
 	jz	.scanskipreturn
 	mov	ax, [es:bx + 1Ah]
 	xor	dx, dx
-	cmp	[fattype], byte 32
-	jne	.scanfixparent_notfat32
+	cmp	[fattype], byte 16
+	jbe	.scanfixparent_notfat32
 	mov	dx, [es:bx + 14h]
 .scanfixparent_notfat32:
 	push	ax
@@ -2440,11 +2456,7 @@ descendtree:
 	call	sectorfromcluster
 	push	si
 	push	di
-	push	ax
-	push	dx
 	call	diskread0
-	pop	dx
-	pop	ax
 	pop	di
 	pop	si
 	or	[bp - 9], byte 1
@@ -2454,8 +2466,8 @@ descendtree:
 	mov	cx, [es:si + 2]
 	mov	es, [buf2seg]
 	mov	[es:3Ah], bx
-	cmp	[fattype], byte 32
-	jne	.scanfixparent_notfat32dentry
+	cmp	[fattype], byte 16
+	jbe	.scanfixparent_notfat32dentry
 	mov	[es:34h], cx
 .scanfixparent_notfat32dentry:
 	push	si
@@ -2948,9 +2960,6 @@ recoverbadsector:
 	push	bp
 	mov	bp, sp
 	sub	sp, 16
-	push	word [clustinbuffer]
-	push	word [clustinbuffer + 2]
-	call	invalidatenextcluster
 	mov	[bp - 4], ax	; BP - 4 = cluster being replaced
 	mov	[bp - 2], dx
 	call	sectorfromcluster
@@ -2972,9 +2981,8 @@ recoverbadsector:
 	pop	ax
 	jmp	.recover_alloc
 .isalreadymarked:
-	mov	dx, 0FFFh	; Since the target is already marked, the replacement must
-	mov	ah, 0FFh	; be end chain as we don't know what comes next.
-	mov	al, [descriptor]
+	mov	dx, 0FFFh		; Since the target is already marked, the replacement must
+	mov	ax, [endchainlow]	; be end chain as we don't know what comes next.
 .recover_alloc:
 	call	alloccluster	; Argument to alloccluster is the value to set it to
 	mov	[bp - 12], ax	; BP - 12 = replaced cluster
@@ -3050,9 +3058,7 @@ recoverbadsector:
 	cmp	ax, [es:0Eh]
 	jae	.nobackupbootsector
 	xor	dx, dx
-	push	ax
 	call	diskread0
-	pop	ax
 	jc	.nobackupbootsector
 	mov	bx, [bp - 10]
 	mov	cx, [bp - 12]
@@ -3065,11 +3071,7 @@ recoverbadsector:
 	pop	word [sectsperchunk]
 	jmp	.epilog
 .issector:	; Operates on chunk at once
-	push	ax
-	push	dx
 	call	diskread0
-	pop	dx
-	pop	ax
 	jc	newbadsectors
 	mov	bx, [bp + 4]
 	mov	cx, [bp - 12]
@@ -3085,8 +3087,6 @@ recoverbadsector:
 	; return new cluster
 	mov	ax, [bp - 12]
 	mov	dx, [bp - 10]
-	pop	word [clustinbuffer + 2]
-	pop	word [clustinbuffer]
 	mov	sp, bp
 	ret	10
 
@@ -3305,19 +3305,15 @@ recoverdirs:
 	mov	ax, [savedfilename]		; First fix parent cluster ref
 	mov	dx, [savedfilename + 2]
 	call	sectorfromcluster
-	push	ax
-	push	dx
 	call	diskread0
 	jc	newbadsectors
-	mov	ax, [bp - 12]
-	mov	[es:3Ah], ax
+	mov	cx, [bp - 12]
+	mov	[es:3Ah], cx
 	cmp	[fattype], byte 16
 	jbe	.fat16b
-	mov	dx, [bp - 10]
-	mov	[es:34h], dx
-.fat16b	pop	dx
-	pop	ax
-	call	diskwrite0
+	mov	cx, [bp - 10]
+	mov	[es:34h], cx
+.fat16b	call	diskwrite0
 	jc	newbadsectors
 	mov	bp, sp	; Will now call into descendtree
 	pop	bp
@@ -3401,7 +3397,6 @@ recoverfiles:
 	xor	cx, cx
 	mov	[savedfilename + 4], cx
 	mov	[savedfilename + 6], cx
-	call	invalidatenextcluster	; hop through FAT and get length
 	mov	es, [buf1seg]
 .szlp	call	getnextcluster
 	mov	cx, [bytesperclust]
@@ -3613,7 +3608,6 @@ mkdirentry:
 	jmp	exit	; TODO normalize exit codes
 
 .mkentry_clust:
-	call	invalidatenextcluster
 	mov	ax, [bytespersector]
 	mul	word [sectsperclust]
 	mov	cl, 5
@@ -3681,11 +3675,7 @@ mkdirentry:
 	add	ax, [sectsperchunk]
 	adc	dx, 0
 	push	di
-	push	ax
-	push	dx
 	call	diskread0
-	pop	dx
-	pop	ax
 	jc	.b0n		; If the bad sector is persistent we haven't damaged anything yet
 	cmp	[es:0], byte 0
 	je	.b0n		; No need to bother
@@ -3714,26 +3704,18 @@ mkdirentry:
 	pop	ax
 	ret
 .mkentryreadthis:
-	mov	ax, [bp - 2]	; Read in storage slot (checking if it's still in buffer is too hard)
+	mov	ax, [bp - 2]	; Read in storage slot (buffer read check will dedupe read)
 	mov	dx, [bp - 4]
-	push	ax
-	push	dx
 	push	di
 	call	diskread0
 	pop	di
-	pop	dx
-	pop	ax
 	jc	.nbad
 	ret
 
 .nbad	jmp	newbadsectors
 .mkentry_scan:
-	push	ax
-	push	dx
 	call	diskread0
 	jc	.nbad
-	pop	dx
-	pop	ax
 	xor	di, di
 .loops	cmp	[es:di], byte 0
 	je	.ends1
@@ -3786,10 +3768,8 @@ mkdirentry:
 ;	We need this due to an LKNL bug.
 initdircluster:
 	push	si
-	call	invalidatenextcluster
 	mov	dx, 0FFFh
-	mov	ah, 0FFh
-	mov	al, [descriptor]
+	mov	ax, [endchainlow]
 	call	alloccluster
 	add	[totalfiles], word 1
 	adc	[totalfiles + 2], word 0
@@ -3844,7 +3824,6 @@ initdircluster:
 	call	diskwrite0
 	pop	dx
 	pop	ax
-	call	invalidatenextcluster
 	ret
 
 totalfilesinc:
@@ -4217,7 +4196,7 @@ fat_quantify:
 	pop	bx
 	ret
 
-entrytoblockall:
+entrytoblockall:	; Writes value to all FAT buffers
 	push	es
 	xor	cx, cx
 .loop	push	cx
@@ -4424,8 +4403,9 @@ ismdesc32:
 	cmp	ah, 0FFh
 .ret	ret
 	
-
+	; Writes buffer to sector; trashes all registers but ES, BP
 diskwrite0:
+	call	setbufsector
 	xor	bx, bx
 diskwrite:
 	mov	cl, 1
@@ -4438,8 +4418,53 @@ diskwrite:
 	mov	al, 3	; TODO error normalization
 	jmp	exit
 
+	; Reads sector to buffer if not already in buffer; trashes BX, CX, SI, DI
+	; CF is set on error
 diskread0:
 	xor	bx, bx
+	push	ax
+	push	dx
+	call	diskread
+	pop	dx
+	pop	ax
+	jc	.cbad
+	call	setbufsector
+	clc
+	ret
+.cbad	push	ax
+	push	dx
+	call	invalidatesector
+	pop	dx
+	pop	ax
+	stc
+	ret
+
+invalidatesector:
+	mov	ax, 0FFFFh
+	mov	dx, ax
+setbufsector:
+	mov	bx, es
+	cmp	bx, [buf1seg]
+	jne	.n1
+	mov	[buf1sector], ax
+	mov	[buf1sector + 2], dx
+	jmp	.n4
+.n1	cmp	bx, [buf2seg]
+	jne	.n2
+	mov	[buf2sector], ax
+	mov	[buf2sector + 2], dx
+	jmp	.n4
+.n2	cmp	bx, [buf3seg]
+	jne	.n3
+	mov	[buf3sector], ax
+	mov	[buf3sector + 2], dx
+	jmp	.n4
+.n3	cmp	bx, [buf4seg]
+	jne	.n4
+	mov	[buf4sector], ax
+	mov	[buf4sector + 2], dx
+.n4	ret
+
 diskread:
 	xor	cx, cx
 
@@ -4616,7 +4641,7 @@ msg_usage	db	'SSDSCAN pre-alpha unusable', 13, 10
 		db	'/F   Fix errors without prompting', 13, 10
 		db	'/C   Check chain length against file length', 13, 10
 		db	'/Z   Recovery directories that have zeroed sectors in the middle', 13, 10
-		db	'     (caution: 0 is normally the directory terminator; can damage FS instead', 13, 10
+		db	'     (caution: 0 is normally the directory terminator; can damage FS instead)', 13, 10
 		db	'/D   Describe filesystem'
 out_newline	db	13, 10, '$'
 out_crfile	db	13, 'File $'
@@ -4678,8 +4703,8 @@ msg_toodeep	db	"Directory tree depth exceed 51; cannot ccontinue.", 13, 10, '$'
 msg_2bigfile	db	" exceeds 4GB by traversal. In the vain hope", 13, 10
 		db	"you have an OS that can read this, repair (truncate) will not be performed.", 13, 10, '$'
 msg_rootbadsect	db	"Bad sector encountered in root directory", 13, 10, '$'
-msg_replacer	db	"New bad sector encountered reading SSD; advise immediate replacement", 13, 10, '$'
-msg_replace	db	"Bad sector encountered writing to SSD; advise immediate replacement", 13, 10, '$'
+msg_replacer	db	13, 10, "New bad sector encountered reading SSD; advise immediate replacement", 13, 10, '$'
+msg_replace	db	13, 10, "Bad sector encountered writing to SSD; advise immediate replacement", 13, 10, '$'
 msg_outofslots	db	"Ran out of root directory entries, free some up.", 13, 10, '$'
 msg_outofspace	db	"Ran out of space repairing disk, free some up.", 13, 10
 msg_goodenuf	db	"The file system should be good enough to move a file off the disk.", 13, 10, '$'
@@ -4720,6 +4745,11 @@ buf2seg		resb	2
 buf3seg		resb	2
 buf4seg		resb	2
 
+buf1sector	resb	4
+buf2sector	resb	4
+buf3sector	resb	4
+buf4sector	resb	4
+
 reservedsects	resb	2
 bytespersector	resb	2
 sectsperchunk	resb	2
@@ -4734,8 +4764,9 @@ firstclustsect	resb	4
 
 zerothclustsect	resb	4		; Optimization hack: direct multiply and add to get sector
 highestclust	resb	4
-clustinbuffer	resb	4
-totalfiles	resb	4
+endchainlow	resb	2
+savedaccessflag	resb	2
+		resb	4
 
 rootdirsects	resb	2
 bytesperclust	resb	2
@@ -4753,8 +4784,8 @@ fatinbitmask	resb	4
 bitmasklen	resb	2
 wordsperchunk	resb	2
 
+totalfiles	resb	4
 foundfiles	resb	4
-		resb	4
 mklostfndclust	resb	4
 		resb	4
 
