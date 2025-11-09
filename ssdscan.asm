@@ -923,7 +923,7 @@ stage_fat:
 	jb	.fat_block_loop
 .set_root_clust_top:
 	call	checkrootclustno
-	mov	ch, 2		; Root cluster is reached
+	mov	cl, 2		; Root cluster is reached
 	call	setbitsclust
 
 .fat_block_loop:
@@ -1231,7 +1231,7 @@ stage_fat:
 	pop	ax
 	jne	.notoverlarge
 	sub	[freeclust], word 1
-	sbb	[freeclust + 2], word 1
+	sbb	[freeclust + 2], word 0
 	push	dx
 	push	ax
 	mov	cl, 2
@@ -1834,9 +1834,6 @@ descendtree:
 	mov	[bp - 14], cx	; BP - 16 = unwind cluster
 	mov	[bp - 16], cx
 	xor	si, si
-	;FIXME something is going haywire here when DX:AX is not 0
-	;This causes recoverdirs to malfunction whenever the directory being recovered
-	;is not empty.
 	mov	[es:si], ax	; Starting cluster of directory
 	mov	[es:si + 2], dx	; TODO: check if FAT32 wants 0 or cluster for .. to root
 	mov	[es:si + 4], ax	; Current cluster of directory
@@ -3404,7 +3401,7 @@ recoverdirs:
 	mov	dx, [savedfilename + 2]
 	push	ax
 	push	dx
-	mov	ch, 1
+	mov	cl, 1
 	call	setbitsclust	; It's reached now
 	pop	dx
 	pop	ax
