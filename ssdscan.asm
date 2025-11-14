@@ -51,12 +51,12 @@ stackbottom	equ	(_endbss - _bss + _end - _start + 100h + 768)
 ; cs:_start   program entry point
 ; cs:_bss     uninitialized data
 ; cs:_endbss  top of stack
-; buf1:0      first FAT buffer
-; buf2:0      second FAT buffer and cluster data buffer
-; buf3:0      third FAT buffer, if we need it
-; buf4:0      working buffer (FAT sort and dirwalk)
-; buf4:0      XMS bitmap pool buffer, if it exists
+; buf1seg:0   first FAT buffer
+; buf2seg:0   second FAT buffer and cluster data buffer
+; buf3seg:0   third FAT buffer, if we need it
+; buf4seg:0   working buffer (FAT sort and dirwalk)
 ; bitbufseg:0 bitmap buffer, if it needs to exist
+; xmspinseg:0 second bitmap buffer, if it needs to exist
 ; cmempool:0  bitmap pool in main memory
 ;
 ; ... additional bitmap pool in dos-allocated RAM
@@ -70,8 +70,8 @@ _start:
 	mov	ax, ds
 	dec	ax
 	mov	es, ax
-	mov	ax, es:[3]
-	cmp	ax, word (stackbottom + 32768) / 16
+	mov	bx, es:[3]
+	cmp	bx, word (stackbottom + 32768) / 16
 	jae	.mem
 .nomem	mov	dx, msg_nocmem
 	mov	ah, 9
@@ -79,12 +79,12 @@ _start:
 	mov	ax, 4C04h			; We can *NOT* jump to exit here; this will trash DOS
 	int	21h				; as the exit-free memory is unintialized
 .mem	mov	sp, stackbottom	
-	sub	ax, (stackbottom) / 16
-	mov	[cmem], ax
+	sub	bx, (stackbottom) / 16
 	mov	di, _bss			; Zero initialize BSS (saves total code size)
 	mov	cx, (_endbss - _bss) / 2
 	xor	ax, ax
 	rep	stosw
+	mov	[cmem], bx
 	mov	si, 81h
 .a	lodsb
 	cmp	al, ' '
@@ -631,7 +631,7 @@ initpools:
 .in12	mov	ax, [wordsperchunk]
 	mov	cl, 3
 	shr	ax, cl			; ax = paragraphs per chunk
-	mov	bx, ax			; bx = ceil(bx / ch)
+	mov	bx, ax			; bx = ceil(ax / ch)
 .dec	shr	bx, 1
 	adc	bx, 0
 	shr	ch, 1			; works because ch is always a power of 2
@@ -661,6 +661,9 @@ initpools:
 	adc	ax, 0
 	loop	.dec2	; When loop terminates, DX:AX is the entire size required in paragraphs
 	mov	si, bitvectorptrs
+%ifdef FORCE_API
+	jmp	.cbigr
+%endif
 	or	dx, dx
 	jnz	.cbigr
 	mov	di, ds
@@ -689,18 +692,27 @@ initpools:
 	ret
 .cbigr	mov	cx, [bitbufseg]
 	add	cx, bx		; BX preserved the entire time: size of bitbufseg required
+	mov	[xmspinseg], cx
+	add	cx, bx		; second pool required so we don't thrash too much scanning the FAT
+	push	cx
+	mov	cl, 6
+	shl	bx, cl
+	mov	[bitbuflen], bx
+	pop	cx
 	mov	[cmempool], cx	; There's no pool (len = 0); remember length of bitbufseg = cmempool - bitbufseg
 	mov	bx, ds
 	add	bx, [cmem]
 	sub	bx, cx
+%ifndef FORCE_API
 	ja	.hcmema
-	jae	.hcmem
+%endif
+	jnc	.hcmem
 	mov	dx, msg_nocmem2
 	mov	ah, 9
 	int	21h
 	mov	al, error_nofix
 	jmp	exit
-.hcmema	sub	ax, bx
+.hcmema	sub	ax, bx		; Add cmempool to pools
 	sbb	dx, 0
 	push	ax
 	push	dx
@@ -709,14 +721,130 @@ initpools:
 	mov	bl, b_mem_internal
 	call	.mcrec
 	pop	dx
-	pop	ax
+	pop	ax	; DX:AX is how many paragraphs we still need
 .hcmem:			; TODO allocate memory from DOS, UMB, and XMS
+%ifndef NO_DOS_MEM
+	; Link in UMBs as we can use them just fine
+	push	ax
+	mov	ax, 5802h
+	cmp	al, 0
+	jne	.nlink
+	mov	ax, 5803h
+	mov	bx, 1
+	int	21h
+	jc	.nlink
+	or	[opflags + 1], byte opflag2_ulink
+.nlink	pop	ax
+
+	; TODO allocate DOS memory
+%endif
+	push	ax
+	push	dx
+	push	ds
+	pop	es
+	mov	ax, 4300h
+	int	2fh
+	cmp	al, 80h
+	jne	.nohmem	; Out of RAM
+	mov	ax, 4310h
+	int	2fh
+	mov	[xmsfunc], bx
+	mov	[xmsfunc + 2], es
+	pop	dx
+	pop	ax
+%ifndef NO_HIGH_MEM
+	push	ax
+	push	dx
+	mov	ah, 1
+	mov	dx, -1	; Get it all
+	mov	ah, 1
+	call	far [xmsfunc]
+	cmp	ax, 1
+	jne	.himemdone
+	mov	ah, 7
+	call	far [xmsfunc]
+	cmp	al, 0
+	jnz	.a20on
+	mov	ah, 5
+	call	far [xmsfunc]
+	cmp	al, 0
+	je	.noa20
+	or	[opflags + 1], byte opflag2_a20
+.a20on	xor	dx, dx
+	mov	ax, 0FFEh
+	mov	cx, 0FFFFh
+	mov	bl, b_mem_high
+	call	.mcrec
+	pop	dx
+	pop	ax
+	sub	ax, 0FFEh
+	sbb	dx, 0
+	jnc	.himemdone
+	jmp	.hmem
+.noa20	mov	ah, 2
+	call	far [xmsfunc]
+	pop	dx
+	pop	ax
+.himemdone:
+%endif
+%ifndef NO_UMB_MEM
+	; TODO allocate UMB memory via low level api
+%endif
+%ifndef FORCE_API
+	or	dx, dx
+	jnz	.try_xms_for_real
+	mov	bx, [cmempool]
+	sub	bx, [bitbufseg]
+	cmp	ax, bx
+	ja	.try_xms_for_real
+	mov	ax, bx			; Total XMS memory requirement fits in XMS buffer
+	mov	bl, b_mem_internal
+	mov	cx, [bitbufseg]
+	call	.mcrec
+	jmp	.hmem
+.try_xms_for_real:
+%endif
+%ifndef NO_XMS
+	; TODO allocate XMS memory
+%endif
+
 	mov	dx, .hcmemmsg
 	mov	ah, 9
 	int	21h
 	mov	al, error_norun
 	jmp	exit
 .hcmemmsg	db	"TODO: XMS", 13, 10, '$'
+
+.nohmem:
+	pop	dx
+	pop	ax
+%ifndef NO_DOS_MEM
+	; TODO allocate DOS memory
+%endif
+	cmp	si, bitvectorptrs + 8 * 128
+	je	.fmem_final
+	or	dx, dx
+	jnz	.nohmem_final
+%ifndef FORCE_API
+	mov	bx, [cmempool]
+	sub	bx, [bitbufseg]
+	cmp	ax, bx
+	ja	.nohmem_final
+	mov	bl, b_mem_internal	; After allocating DOS memory, fits in buffer
+	mov	cx, [bitbufseg]
+	call	.mcrec
+	jmp	.hmem
+%endif
+
+.nohmem_final:
+	mov	dx, msg_noram
+.fmemc	mov	ah, 9
+	int	21h
+	mov	al, error_norun
+	jmp	exit
+.fmem_final:
+	mov	dx, msg_fragram
+	jmp	.fmemc
 
 .hmem:
 	; Zero memory map
@@ -798,7 +926,10 @@ initpools:
 .h0snl	pop	cx
 	xor	ax, ax
 	xor	di, di
-	rep	stosw
+	cmp	[si + bitvectortype], byte b_mem_high
+	jne	.h0low
+	mov	di, 10h
+.h0low	rep	stosw
 .lfatn	add	si, 8
 	cmp	si, bitvectorptrs + (8 * 128)
 	jl	.lfatl
@@ -1459,9 +1590,44 @@ exit:	mov	ah, 4Ch
 	mov	ax, 440Dh
 	mov	cx, 0847h
 	int	21h
-.nac:	
-	; There will be free XMS, etc. here
-	pop	ax
+.nac	test	[opflags + 1], byte opflag2_a20
+	jz	.na20
+	mov	ah, 6
+	call	far [xmsfunc]
+.na20	mov	si, bitvectorptrs
+.free	mov	al, [si + bitvectortype]
+	cmp	al, b_mem_internal
+	jb	.fdone2
+	je	.fdone
+	cmp	al, b_mem_umb
+	jb	.fdos
+	je	.fumb
+	cmp	al, b_mem_xms
+	jb	.fhi
+	jmp	.fxms	; must be XMS (fix this if ever add EMS)
+.fdos	mov	es, [si + bitvectorptr]
+	mov	ah, 49h
+	int	21h
+	jmp	.fdone
+.fumb	mov	ah, 11h
+	mov	dx, [si + bitvectorptr]
+	call	far [xmsfunc]
+	jmp	.fdone
+.fhi	mov	ah, 2h
+	call	far [xmsfunc]
+	jmp	.fdone
+.fxms	mov	ah, 0Ah
+	mov	dx, [si + bitvectorptr]
+	call	far [xmsfunc]
+.fdone	add	si, 8
+	cmp	si, bitvectorptrs + 8 * 128
+	jb	.free
+.fdone2	test	[opflags + 1], byte opflag2_ulink
+	jne	.numb
+	mov	ax, 5803h
+	xor	bx, bx
+	int	21h
+.numb	pop	ax
 	int	21h
 
 ctrlchandler:
@@ -1904,6 +2070,7 @@ descendtree:
 	mov	cx, [bp - 8]
 	mov	[bp - 6], cx
 	call	sectorfromcluster
+	add	ax, bx			; Cannot overflow
 .readdirchunk:
 	test	[bp - 9], byte 1	; If we're rewinding we have to check if
 	jnz	.readdirchunkcachemiss	; it's the same chunk or not, but if the
@@ -4018,7 +4185,10 @@ bitsclustcommon:
 	rcr	ax, 1
 	shr	dx, 1
 	rcr	ax, 1
-	mov	bx, ax
+	cmp	[si + bitvectortype], byte b_mem_high
+	jne	.nh
+	add	ax, 10h
+.nh	mov	bx, ax
 	ret
 .xms	int3	; TODO fetch from XMS
 .fault	int3	; FIXME
@@ -4053,6 +4223,8 @@ scanbitsclust:
 	mov	di, [si + bitvectorlength]
 	call	.div2ceil	; 4 entries per byte
 	call	.div2ceil
+	cmp	[si + bitvectortype], byte b_mem_high
+	je	.high
 	; Tricky part: do big chunks first
 	test	bx, bx
 	jz	.mide
@@ -4076,6 +4248,9 @@ scanbitsclust:
 	mov	sp, bp
 	pop	bp
 	ret	2
+.high	add	di, 10h
+	call	.innerhisetup
+	jmp	.cont
 .xms	int3	;TODO fetch from XMS
 .fault	mov	ax, [si + bitvectortype]
 	call	outax
@@ -4088,9 +4263,13 @@ scanbitsclust:
 	adc	bx, 0
 	ret
 
+.innerhisetup:
+	push	bx
+	mov	bx, 10h
+	jmp	.innerh
 .inner	push	bx		; .inner destroys CL only
 	xor	bx, bx
-	test	al, 2		; Loop is unrolled -- must be first entry
+.innerh	test	al, 2		; Loop is unrolled -- must be first entry
 	jnz	.inner2
 
 .innerl	mov	cl, [es:bx]
@@ -4589,30 +4768,34 @@ diskreadwrite:
 	mov	[bp - 12], bx
 	mov	[bp - 6], ds
 	mov	[bp - 4], cx
-	test	[opflags + 1], byte opflag2_bigdisk
+	test	[opflags + 1], byte opflag2_7305
 	jnz	.fat32
-	add	bx, ax		; Check if we know it's big already
-	jc	.big
-	or	dx, dx
-	jnz	.big
 	test	[opflags + 1], byte opflag2_bigdisk
 	jnz	.big
+	add	bx, ax		; Switch to big if a big offset is requested
+	jc	.bigf
+	or	dx, dx
+	jnz	.bigf
 	lds	bx, [bp - 10]
 	mov	cx, [bp - 12]
 	mov	dx, [bp - 16]
 	call	.i2526
 	jnc	.exit
 	cmp	ax, 0207h
-	jne	.exitc
+	stc
+	jnz	.exit
 	mov	ds, [bp - 6]
-	or	[opflags + 1], byte opflag2_bigdisk
+.bigf	or	[opflags + 1], byte opflag2_bigdisk
 .big	mov	cx, 0FFFFh
-	lea	dx, [bp - 16]
+	lea	bx, [bp - 16]
 	call	.i2526
 	jnc	.exit
 	cmp	ax, 0207h
-	jne	.exitc
+	stc
+	jnz	.exit
+	or	[opflags + 1], byte opflag2_7305
 .fat32	mov	si, [bp - 4]
+	lea	bx, [bp - 16]
 	mov	dl, [cs:disk]
 	inc	dl
 	mov	ax, 7305h
@@ -4622,10 +4805,7 @@ diskreadwrite:
 	mov	sp, bp
 	pop	bp
 	ret
-.exitc	stc
-	jmp	.exit
 .i2526	mov	al, [cs:disk]
-	lds	bx, [bp - 10]
 	mov	[cs:preserve_bp], bp
 	sub	sp, 2
 	mov	[cs:preserve_sp], sp
@@ -4746,6 +4926,8 @@ out_newline	db	13, 10, '$'
 out_crfile	db	13, 'File $'
 msg_nocmem	db	'Insufficient Conventional Memory available to check any disk.', 13, 10, '$'
 msg_nocmem2	db	'Insufficient Conventional Memory available to check this disk.', 13, 10, '$'
+msg_noram	db	'Insufficinet memory available to check this disk.', 13, 10, '$'
+msg_fragram	db	'Memory is too fragmented, try rebooting.', 13, 10, '$'
 msg_cancel	db	"^C: Cancelled", 13, 10, '$'
 state_mediaq	db	13, 10
 state_media	db	        'Media Descriptor     : $'
@@ -4890,6 +5072,19 @@ foundfiles	resb	4
 mklostfndclust	resb	4
 		resb	4
 
+xmsfunc		resb	4
+bitbuflen	resb	2		; In entries
+pinseg		resb	2
+xmspinseg	resb	4
+		resb	4
+
+bitbuflow	resb	4
+bitbufhigh	resb	4
+pinlow		resb	4
+pinhigh		resb	4
+
+
+
 savedfilename	resb	16		; Saved file name and time (keep me on bottom)
 
 _endbss:
@@ -4913,6 +5108,8 @@ opflag2_7305	equ 2
 opflag2_ebpb	equ 4
 opflag2_cbf	equ 8
 opflag2_rclust	equ 16
+opflag2_ulink	equ 64
+opflag2_a20	equ 128
 
 error_nofix	equ 4
 error_norun	equ 8
