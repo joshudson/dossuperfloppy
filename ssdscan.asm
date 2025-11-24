@@ -638,6 +638,10 @@ initpools:
 	jnz	.dec
 
 .initall:
+	mov	cx, [highestclust]	; copy of highestclust for byte clamping
+	mov	[savedfilename], cx
+	mov	cx, [highestclust + 2]
+	mov	[savedfilename + 2], cx
 	mov	cx, [buf1seg]
 	add	cx, ax
 	mov	[buf2seg], cx
@@ -665,7 +669,7 @@ initpools:
 	jmp	.cbigr
 %endif
 	or	dx, dx
-	jnz	.cbigr
+	jnz	short .cbigr
 	mov	di, ds
 	add	di, [cmem]
 	sub	di, ax
@@ -677,18 +681,31 @@ initpools:
 	xor	dx, dx
 	mov	cx, [bitbufseg]
 	mov	bl, b_mem_internal
-	call	.mcrec			; Record single entry for all memory
+	call	.mcrec0			; Record single entry for all memory
 	jmp	.hmem
-.mcrec	push	cx			; BL = type, CX = pointer, DX:AX = how many paragraphs
+.mcrec0	xor	di, di			; BL = type, CX = segment, DX:AX = how many paragraphs
+.mcrec	push	cx			; DI = offset
 	mov	cx, 6
 .mcmm	shl	ax, 1
 	rcl	dx, 1
 	loop	.mcmm
 	pop	cx
+.mrec_common:				; BL = type, CX:DI = ptr, DX:AX = how many cells
+	cmp	dx, [savedfilename + 2]
+	jb	.mcrecl
+	ja	.mcrech
+	cmp	ax, [savedfilename]
+	jbe	.mcrecl
+.mcrech	mov	ax, [savedfilename]
+	mov	dx, [savedfilename + 2]
+.mcrecl	sub	[savedfilename], ax
+	sbb	[savedfilename + 2], dx
 	mov	[si + bitvectortype], bl
-	mov	[si + bitvectorptr], cx
+	mov	[si + bitvectorptr], di
+	mov	[si + bitvectorptr + 2], cx
 	mov	[si + bitvectorlength], ax
 	mov	[si + bitvectorlength + 2], dx
+	add	si, bitvectorrlen
 	ret
 .cbigr	mov	cx, [bitbufseg]
 	add	cx, bx		; BX preserved the entire time: size of bitbufseg required
@@ -719,10 +736,10 @@ initpools:
 	mov	ax, bx
 	xor	dx, dx
 	mov	bl, b_mem_internal
-	call	.mcrec
+	call	.mcrec0
 	pop	dx
 	pop	ax	; DX:AX is how many paragraphs we still need
-.hcmem:			; TODO allocate memory from DOS, UMB, and XMS
+.hcmem:
 %ifndef NO_DOS_MEM
 	; Link in UMBs as we can use them just fine
 	push	ax
@@ -735,8 +752,10 @@ initpools:
 	jc	.nlink
 	or	[opflags + 1], byte opflag2_ulink
 .nlink	pop	ax
-
-	; TODO allocate DOS memory
+	; Allocate DOS memory; early limit to avoid breaking down in the rare case of excessive fragmentation
+	mov	di, bitvectorptrs + bitvectorlength * 60
+	call	.dosalloc
+	jz	.hmem
 %endif
 	push	ax
 	push	dx
@@ -760,35 +779,92 @@ initpools:
 	mov	ah, 1
 	call	far [xmsfunc]
 	cmp	ax, 1
-	jne	.himemdone
-	mov	ah, 7
+	je	.himem
+	xor	bx, bx
+	mov	ax, 4A01h
+	int	2fh
+	test	bx, bx	; ES:DI = ptr, BX = len
+	jz	.nohim
+	mov	ax, 0FFF0h
+	sub	ax, di
+	mov	cl, 4
+	shr	ax, cl
+	jz	.nohim
+	push	ax
+	call	.a20e
+	pop	ax
+	jz	.nohim
+	push	ax
+	xor	dx, dx
+	mov	cx, 0FFFFh
+	mov	bl, b_mem_internal
+	call	.mcrec
+	pop	cx
+	jmp	.hmpost
+.himem	call	.a20e
+	je	.noa20h
+	xor	dx, dx
+	mov	ax, 1000h
+	mov	cx, 0FFFFh
+	mov	di, 10h
+	mov	bl, b_mem_high
+	call	.mcrec
+	mov	cx, 0FFEh
+.hmpost	pop	dx
+	pop	ax
+	sub	ax, cx
+	sbb	dx, 0
+	jnc	.hmd
+.hmz	jmp	.hmem
+.hmd	jnz	.himemdone
+	test	ax, ax
+	jz	.hmz
+	jmp	.himemdone
+.a20e	mov	ah, 7
 	call	far [xmsfunc]
 	cmp	al, 0
-	jnz	.a20on
+	jnz	.a20f
 	mov	ah, 5
 	call	far [xmsfunc]
 	cmp	al, 0
-	je	.noa20
+	jz	.a20f
 	or	[opflags + 1], byte opflag2_a20
-.a20on	xor	dx, dx
-	mov	ax, 0FFEh
-	mov	cx, 0FFFFh
-	mov	bl, b_mem_high
-	call	.mcrec
-	pop	dx
-	pop	ax
-	sub	ax, 0FFEh
-	sbb	dx, 0
-	jnc	.himemdone
-	jmp	.hmem
-.noa20	mov	ah, 2
+.a20f	ret	; returns ZF set = no A20, ZF clear = A20
+.noa20h	mov	ah, 2
 	call	far [xmsfunc]
-	pop	dx
+.nohim	pop	dx
 	pop	ax
 .himemdone:
 %endif
 %ifndef NO_UMB_MEM
-	; TODO allocate UMB memory via low level api
+	mov	cx, 2000h
+.nxtumb	push	ax
+	push	dx
+	mov	dx, cx
+.nxtum2	mov	ah, 10h
+	call	far [xmsfunc]
+	test	ax, ax
+	jz	.noumb
+	push	dx
+	xor	ax, ax
+	mov	cx, bx
+	xchg	ax, dx
+	mov	bl, b_mem_umb
+	call	.mcrec0
+	pop	cx
+	pop	dx
+	pop	ax
+	sub	ax, cx
+	sbb	dx, 0
+	jc	.uhmem
+	jnz	.nxtumb
+	test	ax, ax
+	jnz	.nxtumb
+.uhmem	jmp	.hmem
+.noumb	cmp	bl, 0B0h
+	je	.nxtum2		; There's a smaller UMB and it told us how big
+	pop	dx
+	pop	ax
 %endif
 %ifndef FORCE_API
 	or	dx, dx
@@ -800,41 +876,105 @@ initpools:
 	mov	ax, bx			; Total XMS memory requirement fits in XMS buffer
 	mov	bl, b_mem_internal
 	mov	cx, [bitbufseg]
-	call	.mcrec
+	call	.mcrec0
 	jmp	.hmem
 .try_xms_for_real:
 %endif
 %ifndef NO_XMS
-	; TODO allocate XMS memory
-%endif
-
-	mov	dx, .hcmemmsg
+	mov	bx, [bitbuflen]		; pre set up for erase XMS memory
+	shr	bx, 1
+	shr	bx, 1
+	mov	[xms_xfer_len], bx
+	mov	es, [bitbufseg]
+	push	ax
+	xor	di, di
+	mov	cx, [xms_xfer_len]
+	xor	ax, ax
+	rep	stosw
+	pop	ax
+.xmsalloc:				; Note that we don't care at all about over-allocation
+	cmp	si, bitvectorptrs + bitvectorlength * 128	; In case someone really does have >64 handles
+	je	.xmsdone
+	push	ax
+	push	dx
+	mov	ah, 8
+	call	far [xmsfunc]
+	or	ax, ax
+	jz	.nomorehmemp			; All out
+	xchg	ax, dx
+	mov	cx, dx
 	mov	ah, 9
-	int	21h
-	mov	al, error_norun
-	jmp	exit
-.hcmemmsg	db	"TODO: XMS", 13, 10, '$'
-
-.nohmem:
+	call	far [xmsfunc]
+	cmp	al, 1
+	jne	.nomorehmemp
+	push	cx			; Need how many kilobytes l8r
+	mov	di, dx			; handle
+	mov	dx, cx
+	xor	ax, ax			; Shift up 12 times
+	mov	cx, 4			; best impl as up 16, down 4
+.xmssl	shr	ax, 1			; Cannot overflow because
+	rcr	dx, 1			; the starting point fits in 1 register
+	loop	.xmssl
+	xor	cx, cx
+	mov	bl, b_mem_xms
+	call	.mrec_common
+	pop	di
+	xor	bx, bx
+	shr	di, 1			; Shift down 6 times
+	rcr	bx, 1			; best done as up 8 down 2
+	shr	di, 1
+	rcr	bx, 1
 	pop	dx
 	pop	ax
-%ifndef NO_DOS_MEM
-	; TODO allocate DOS memory
+	sub	ax, bx
+	sbb	dx, di
+	jc	.xmnvf
+	jnz	.xmsalloc
+	or	ax, ax
+	jnz	.xmsalloc
+.xmnvf	jmp	.nomorehmem
 %endif
-	cmp	si, bitvectorptrs + 8 * 128
-	je	.fmem_final
-	or	dx, dx
-	jnz	.nohmem_final
+
+.nohmem:				; High memory API not available
+	pop	dx
+	pop	ax
 %ifndef FORCE_API
-	mov	bx, [cmempool]
-	sub	bx, [bitbufseg]
-	cmp	ax, bx
-	ja	.nohmem_final
+	push	ax			; Scavenge high memory buffers
+	push	dx
+	mov	ax, [cmempool]
+	sub	ax, [bitbufseg]
 	mov	bl, b_mem_internal	; After allocating DOS memory, fits in buffer
 	mov	cx, [bitbufseg]
-	call	.mcrec
+	push	ax
+	call	.mcrec0
+	pop	cx
+	sub	ax, cx
+	sbb	dx, 0
+	jc	.nohmem_vok
+	jnz	.xmsdone
+	or	ax, ax
+	jnz	.xmsdone
+.nohmem_vok:
 	jmp	.hmem
 %endif
+.xmsdone:
+%ifndef NO_DOS_MEM
+	mov	di, bitvectorptrs + bitvectorlength * 128
+	call	.dosalloc
+	jz	.hmem
+%endif
+	jmp	.nohmem_final
+.nomorehmemp:
+	pop	dx
+	pop	ax
+.nomorehmem:
+%ifndef NO_DOS_MEM
+	mov	di, bitvectorptrs + bitvectorlength * 128
+	call	.dosalloc
+	jz	.hmem
+%endif
+	cmp	si, bitvectorptrs + bitvectorlength * 128
+	je	.fmem_final
 
 .nohmem_final:
 	mov	dx, msg_noram
@@ -846,6 +986,46 @@ initpools:
 	mov	dx, msg_fragram
 	jmp	.fmemc
 
+.dosalloc:
+	cmp	si, di
+	je	.dosalloc_stop
+	push	ax
+	push	dx
+	push	di
+.dosalloc_rtr:
+	mov	bx, 0FFFFh
+	mov	ah, 48h
+	int	21h
+	cmp	al, 8
+	jne	.dosalloc_no
+	xchg	ax, bx
+	mov	ah, 48h
+	int	21h
+	jc	.dosalloc_rtr	; Did a TSR just allocate memory?
+	xchg	ax, cx
+	xchg	ax, bx
+	xor	dx, dx
+	mov	bl, b_mem_dos
+	push	ax
+	call	.mcrec0
+	pop	cx
+	pop	di
+	pop	dx
+	pop	ax
+	sub	ax, cx
+	sbb	dx, 0
+	mov	cx, [savedfilename]
+	or	cx, [savedfilename + 2]
+	jnz	.dosalloc
+	ret
+.dosalloc_no:
+	pop	dx
+	pop	ax
+	ret		; Z flag is set
+.dosalloc_stop:
+	or	di, di	; clear Z flag
+	ret
+
 .hmem:
 	; Zero memory map
 	mov	si, bitvectorptrs
@@ -855,51 +1035,35 @@ initpools:
 	cmp	al, byte b_mem_xms
 	jb	.h0seg
 	; It's some kind of API-swapped memory
-	test	[opflags + 1], byte opflag2_cbf
-	jnz	.cfbc
-	mov	es, [bitbufseg]
-	xor	di, di
-	mov	cx, [cmempool]
-	sub	cx, [bitbufseg]
-	shl	cx, 1
-	shl	cx, 1
-	shl	cx, 1
-	xor	ax, ax
-	rep	stosw
-	mov	[xms_xfer_len + 2], word 0
-	call	xmssegsrc
-	or	[opflags + 1], byte opflag2_cbf
-.cfbc	mov	ax, [si + 4]
-	mov	dx, [si + 6]
+	mov	ax, [si + bitvectorlength]
+	mov	dx, [si + bitvectorlength + 2]
+	shr	dx, 1
+	rcr	ax, 1
+	shr	dx, 1
+	rcr	ax, 1
 	mov	bx, ax
 	mov	di, dx
-	mov	cx, [cmempool]
-	sub	cx, [bitbufseg]
-.cfbcl	or	dx, dx
-	jnz	.cfbcb
-.cfbcl2	cmp	ax, cx
-	ja	.cfbcb
-	mov	cx, ax
-.cfbcb	mov	[xms_xfer_len], cx		; Right now the only kind of API-swapped memory is XMS so we do that.
-	mov	[xms_xfer_dstoff], bx
+	mov	cx, [si + bitvectorptr]
+	mov	[xms_xfer_dst], cx
+.cfbcb	mov	[xms_xfer_dstoff], bx		; Right now the only kind of API-swapped memory is XMS so we do that.
 	mov	[xms_xfer_dstoff + 2], di
 	push	si
 	push	ax
-	mov	si, [si + 2]
+	mov	si, [si + bitvectorptr]
 	mov	[xms_xfer_src], si
-	mov	ah, 0bh
-	call	far [xmsaddr]
+	mov	ah, 0Bh
+	call	far [xmsfunc]
 	pop	ax
 	pop	si
-	add	bx, cx
+	add	bx, [xms_xfer_len]
 	add	di, 0
-	sub	ax, cx
+	sub	ax, [xms_xfer_len]
 	sbb	dx, 0
-	jnz	.cfbcl2
+	jnz	.cfbcb
 	test	ax, ax
-	jnz	.cfbcl
+	jnz	.cfbcb
 	jmp	.lfatn
-.h0seg	mov	es, [si + bitvectorptr]
+.h0seg	mov	es, [si + bitvectorptr + 2]	; Fundamental assumption: a *big* record is paragraph aligned
 	mov	ax, [si + bitvectorlength]
 	mov	dx, [si + bitvectorlength + 2]
 	shr	dx, 1
@@ -925,13 +1089,10 @@ initpools:
 	jnz	.h0sl
 .h0snl	pop	cx
 	xor	ax, ax
-	xor	di, di
-	cmp	[si + bitvectortype], byte b_mem_high
-	jne	.h0low
-	mov	di, 10h
-.h0low	rep	stosw
-.lfatn	add	si, 8
-	cmp	si, bitvectorptrs + (8 * 128)
+	mov	di, [si + bitvectorptr]
+	rep	stosw
+.lfatn	add	si, bitvectorrlen
+	cmp	si, bitvectorptrs + bitvectorrlen * 128
 	jl	.lfatl
 
 	; Final Media Descriptor Check; any FAT have a Media Descriptor?
@@ -1619,8 +1780,8 @@ exit:	mov	ah, 4Ch
 .fxms	mov	ah, 0Ah
 	mov	dx, [si + bitvectorptr]
 	call	far [xmsfunc]
-.fdone	add	si, 8
-	cmp	si, bitvectorptrs + 8 * 128
+.fdone	add	si, bitvectorrlen
+	cmp	si, bitvectorptrs + bitvectorrlen * 128
 	jb	.free
 .fdone2	test	[opflags + 1], byte opflag2_ulink
 	jne	.numb
@@ -2070,7 +2231,8 @@ descendtree:
 	mov	cx, [bp - 8]
 	mov	[bp - 6], cx
 	call	sectorfromcluster
-	add	ax, bx			; Cannot overflow
+	add	ax, bx
+	adc	dx, word 0
 .readdirchunk:
 	test	[bp - 9], byte 1	; If we're rewinding we have to check if
 	jnz	.readdirchunkcachemiss	; it's the same chunk or not, but if the
@@ -3359,7 +3521,8 @@ alloccluster:
 	int	21h
 	mov	al, error_nofix
 	jmp	exit
-.found	mov	sp, bp		; longjmp!
+.found	call	scanbitsclust.unwind
+	mov	sp, bp		; longjmp!
 	pop	bp
 	pop	cx		; Trash
 	pop	cx
@@ -4123,9 +4286,12 @@ getdatetime:
 getbitsclustdi:
 	add	ax, di
 	adc	dx, 0
+	mov	ch, 1
+	jmp	getbitsclust.e2
 	;DX:AX = base cluster
 getbitsclust:
-	push	es
+	mov	ch, 0
+.e2	push	es
 	call	bitsclustcommon
 	mov	ch, [es:bx]
 	shr	ch, cl
@@ -4137,8 +4303,11 @@ getbitsclust:
 setbitsclustdi:
 	add	ax, di
 	adc	dx, 0
+	mov	ch, 3
+	jmp	setbitsclust.e2
 setbitsclust:
-	push	es
+	mov	ch, 2
+.e2	push	es
 	push	cx
 	call	bitsclustcommon
 	pop	ax
@@ -4151,8 +4320,11 @@ setbitsclust:
 clearbitsclustdi:
 	add	ax, di
 	adc	dx, 0
+	mov	ch, 3
+	jmp	clearbitsclust.e2
 clearbitsclust:
-	push	es
+	mov	ch, 2
+.e2	push	es
 	push	cx
 	call	bitsclustcommon
 	pop	ax
@@ -4164,6 +4336,22 @@ clearbitsclust:
 	ret
 
 bitsclustcommon:
+	mov	si, bitbufsi
+	call	isbitsclustcommon
+	jc	.cache
+	mov	si, pinsi
+	call	isbitsclustcommon
+	jnc	.scan
+.cache	test	ch, byte 2
+	jz	.cnr
+	or	[si], byte 1
+.cnr	mov	es, [si + 2]
+	sub	dx, [si + 6]
+	sub	ax, [si + 4]
+	xor	bx, bx
+	jmp	.thisc
+.scan	push	dx
+	push	ax
 	mov	si, bitvectorptrs
 .loop	cmp	[si + bitvectorlength + 2], dx
 	ja	.this
@@ -4172,26 +4360,160 @@ bitsclustcommon:
 	jae	.this
 .next	sub	ax, [si + bitvectorlength]
 	sbb	dx, [si + bitvectorlength + 2]
-	add	si, 8
+	add	si, bitvectorrlen
 	jmp	.loop
 .this	cmp	[si + bitvectortype], byte b_mem_xms
 	je	.xms
 	ja	.fault
-	mov	es, [si + bitvectorptr]	; It's addressible memory
-	mov	cl, al
-	and	cl, 3
-	shl	cl, 1
-	shr	dx, 1
-	rcr	ax, 1
-	shr	dx, 1
-	rcr	ax, 1
-	cmp	[si + bitvectortype], byte b_mem_high
-	jne	.nh
-	add	ax, 10h
-.nh	mov	bx, ax
+	push	si
+	push	cx
+	mov	si, bitbufsi
+	test	ch, byte 1
+	jnz	.fbuf
+	mov	si, pinsi
+.fbuf	call	swapbitsclustcommon
+	pop	cx
+	test	ch, byte 2
+	jc	.fcln
+	or	[si], byte 1
+.fcln	pop	si
+	add	sp, 4
+	les	bx, [si + bitvectorptr]		; It's addressible memory
+.thisc	call	.bytoff
+	add	bx, ax
+	adc	dx, 0
+	mov	ax, es
+	mov	cl, 12
+	shl	dx, cl
+	add	ax, dx
+	mov	es, ax
 	ret
+.bytoff	shr	dx, 1
+	rcr	ax, 1
+	shr	dx, 1
+	rcr	ax, 1
 .xms	int3	; TODO fetch from XMS
 .fault	int3	; FIXME
+
+	; DX:AX = cluster, SI = pointer to cache control record
+isbitsclustcommon:
+	cmp	dx, [si + 6]
+	jb	.no
+	ja	.ab
+	cmp	ax, [si + 4]
+	jb	.no
+.ab	cmp	dx, [si + 10]
+	ja	.no
+	jb	.yes
+	cmp	ax, [si + 8]
+	jae	.no
+.yes	stc
+	ret
+.no	clc
+	ret
+
+	; DX:AX = offset into selected, SI = pointer to cache control record, on stack = skipped, new record pointer, cluster
+	; Stack arguments remain on stack, trashes BX, CX
+swapbitsclustcommon:
+	push	bp
+	mov	bp, sp
+	push	dx
+	push	ax
+	mov	bx, [si]
+	test	bx, 1
+	jz	.clean
+	and	bx, 7FFFh
+	cmp	[bx + bitvectortype], byte b_mem_xms
+	jb	.clean
+	push	ax
+	push	dx
+	mov	es, [si + 2]	; XMS write up
+	xor	ax, ax
+	mov	[xms_xfer_src], word ax
+	mov	[xms_xfer_srcoff], word ax
+	mov	[xms_xfer_srcoff + 2], es
+	mov	ax, [bx + bitvectorptr]
+	mov	[xms_xfer_dst], ax
+	mov	ax, [si + 12]
+	mov	dx, [si + 14]
+	mov	[xms_xfer_dstoff], ax
+	mov	[xms_xfer_dstoff + 2], dx
+	push	si
+	mov	ah, 0Bh
+	mov	si, xms_xfer_len
+	call	far [xmsfunc]
+	pop	si
+	pop	dx
+	pop	ax
+.clean	mov	bx, [bp + 6]
+	test	bx, bx
+	jnz	.useful
+	mov	[si], bx
+	mov	[si + 4], bx
+	mov	[si + 6], bx
+	mov	[si + 8], bx
+	mov	[si + 10], bx
+.useful	cmp	[bx + bitvectortype], byte b_mem_xms
+	je	.xms
+	ja	.fault
+	call	.load
+	mov	ax, [bp + 8]
+	mov	dx, [bp + 10]
+	mov	[si + 4], ax
+	mov	[si + 6], dx
+	add	ax, [bx + bitvectorlength]
+	adc	dx, [bx + bitvectorlength + 2]
+	mov	[si + 8], ax
+	mov	[si + 10], dx
+	jmp	.ret
+.fault	mov	si, bx
+	jmp	scanbitsclust.fault
+.xms	mov	ax, [bp - 4]	; Compute offset alignment, so that we can use equality comparison
+	mov	dx, [bp - 2]	; rather than overlap comparison for XMS buffers
+	mov	cx, [bitbuflen]
+	dec	cx
+	or	ax, cx
+	xor	ax, cx
+	inc	cx
+	mov	[si + 4], ax
+	mov	[si + 6], dx
+	add	ax, cx		; Cannot overflow
+	mov	[si + 8], ax
+	mov	[si + 10], dx
+	sub	ax, cx
+	call	.load
+	shr	dx, 1		; Compute offset into XMS buffer
+	ror	ax, 1
+	shr	dx, 1
+	ror	ax, 1
+	mov	[si + 12], ax
+	mov	[si + 14], dx
+	mov	es, [si + 2]	; XMS read down
+	xor	ax, ax
+	mov	[xms_xfer_dst], ax
+	mov	[xms_xfer_dstoff], ax
+	mov	[xms_xfer_dstoff + 2], es
+	mov	ax, [bx + bitvectorptr]
+	mov	[xms_xfer_src], ax
+	mov	ax, [si + 12]
+	mov	dx, [si + 14]
+	mov	[xms_xfer_srcoff], ax
+	mov	[xms_xfer_srcoff + 2], dx
+	push	si
+	mov	ah, 0Bh
+	mov	si, xms_xfer_len
+	call	far [xmsfunc]
+	pop	si
+.ret	pop	ax
+	pop	dx
+	pop	bp
+	ret
+.load	mov	[si], bx
+	mov	cx, [bx + bitvectorptr]
+	mov	[si], cx
+	mov	cx, [bx + bitvectorptr + 2]
+	mov	[si + 2], cx
+	ret
 
 	; Locate all entries matching a pattern
 	; Arguments: CH = pattern, stack = callback (called with bp + 4 = address of callback)
@@ -4205,26 +4527,30 @@ bitsclustcommon:
 scanbitsclust:
 	push	bp
 	mov	bp, sp
-	sub	sp, 4		; May be used later for xms routine
+	sub	sp, 12
 	mov	si, bitvectorptrs
 	xor	dx, dx
 	mov	ax, 2
 	mov	cl, 4
 	shl	ch, cl		; We start at 2
+	mov	[bp - 6], byte 0
+	test	[opflags + 1], byte opflag2_sbcpin
+	jnz	.outer
+	mov	[bp - 6], byte opflag2_sbcpin
+	or	[opflags + 1], byte opflag2_sbcpin
 
 	; Outer loop -- get bitvector to enumerate
 .outer	cmp	[si + bitvectortype], byte 0
 	je	.retouter
 	cmp	[si + bitvectortype], byte b_mem_xms
-	je	.xms
 	ja	.fault
-	mov	es, [si + bitvectorptr]
+	je	.xms
+	les	bx, [si + bitvectorptr]
+	mov	[bp - 4], bx	; small-size offset
 	mov	bx, [si + bitvectorlength + 2]
 	mov	di, [si + bitvectorlength]
 	call	.div2ceil	; 4 entries per byte
 	call	.div2ceil
-	cmp	[si + bitvectortype], byte b_mem_high
-	je	.high
 	; Tricky part: do big chunks first
 	test	bx, bx
 	jz	.mide
@@ -4241,20 +4567,69 @@ scanbitsclust:
 	jmp	.mid
 	pop	di
 .mide	call	.inner
-.cont	add	si, 8
-	cmp	si, bitvectorptrs + 8 * 128
+.cont	add	si, bitvectorrlen
+	cmp	si, bitvectorptrs + bitvectorrlen * 128
 	jb	.outer
 .retouter:
+	call	.unwind
 	mov	sp, bp
 	pop	bp
 	ret	2
-.high	add	di, 10h
-	call	.innerhisetup
-	jmp	.cont
-.xms	int3	;TODO fetch from XMS
 .fault	mov	ax, [si + bitvectortype]
 	call	outax
 	jmp	exit
+.xms	mov	[bp - 4], word 0	; Always use seg pointers for XMS
+	mov	[bp - 8], ax		; Initial offset, used later
+	mov	[bp - 6], dx
+	mov	bx, dx
+	mov	di, ax
+	add	di, [si + bitvectorlength]
+	adc	bx, [si + bitvectorlength + 2]
+	mov	[bp - 12], di		; Final offset
+	mov	[bp - 10], bx
+.xmsnxt	push	si
+	mov	si, bitbufsi
+	call	isbitsclustcommon
+	jc	.cache
+	mov	si, pinsi
+	call	isbitsclustcommon
+	jc	.cache
+.scan	pop	si
+	push	si		; preserve
+	push	ax		; cluster
+	push	dx
+	push	si		; record selected
+	push	cx		; preserved
+	sub	ax, [bp - 8]	; offset
+	sbb	dx, [bp - 6]
+	mov	si, bitbufsi
+	test	[bp - 6], byte opflag2_sbcpin
+	jz	.scan2
+	mov	si, pinsi
+.scan2	call	swapbitsclustcommon
+	pop	cx
+	add	sp, 2		; we need cache (still in si) not record selected
+	pop	dx
+	pop	ax
+.cache	mov	di, [si + 8]
+	mov	bx, [si + 10]
+	sub	di, [si + 4]
+	sbb	bx, [si + 6]
+	call	.div2ceil	; 4 entries per byte
+	call	.div2ceil
+	mov	es, [si + 2]
+	pop	si		; get record selected back
+	call	.inner
+	cmp	dx, [bp - 10]
+	jb	.xmsnxt
+	ja	.xmslst
+	cmp	ax, [bp - 12]
+	jb	.xmsnxt
+.xmslst	jmp	.cont
+.unwind	test	[bp - 6], byte opflag2_sbcpin	; alloccluster depends on this not trashing DX:AX
+	jz	.uret
+	and	[opflags + 1], byte ~opflag2_sbcpin
+.uret	ret
 
 .div2ceil:
 	shr	bx, 1
@@ -4263,13 +4638,9 @@ scanbitsclust:
 	adc	bx, 0
 	ret
 
-.innerhisetup:
-	push	bx
-	mov	bx, 10h
-	jmp	.innerh
 .inner	push	bx		; .inner destroys CL only
-	xor	bx, bx
-.innerh	test	al, 2		; Loop is unrolled -- must be first entry
+	mov	bx, [bp - 4]	; offset, saved above
+	test	al, 2		; Loop is unrolled -- must be first entry
 	jnz	.inner2
 
 .innerl	mov	cl, [es:bx]
@@ -4826,24 +5197,6 @@ diskreadwrite:
 	stc
 	ret
 
-xmssegsrc:	; ES -> XMS SRC; destroys AX, CX, DX
-	mov	ax, es
-	mov	cx, 16
-	mul	ax
-	mov	[xms_xfer_src], word 0
-	mov	[xms_xfer_srcoff], ax
-	mov	[xms_xfer_srcoff + 2], dx
-	ret
-
-xmssegdst:	; ES -> XMS DST; destroys AX, CX, DX
-	mov	ax, es
-	mov	cx, 16
-	mul	ax
-	mov	[xms_xfer_dst], word 0
-	mov	[xms_xfer_dstoff], ax
-	mov	[xms_xfer_dstoff + 2], dx
-	ret
-
 	align 2, db 0CCh
 
 shelltabs	dw	1, 3, 6, 13, 28, 61, 134, 294, 646, 1421, 3126, 6877
@@ -5007,7 +5360,7 @@ xms_xfer_srcoff	resb	4
 xms_xfer_dst	resb	2
 xms_xfer_dstoff	resb	4
 
-bitvectorptrs	resb	8 * 128		; Use bitvector* constants as index offsets
+bitvectorptrs	resb	bitvectorrlen * 128	; Use bitvector* constants as index offsets
 
 entriestowords	resb	2		; Function pointers
 entryfromblock	resb	2
@@ -5049,11 +5402,11 @@ zerothclustsect	resb	4		; Optimization hack: direct multiply and add to get sect
 highestclust	resb	4
 endchainlow	resb	2
 savedaccessflag	resb	2
-		resb	4
+mklostfndclust	resb	4
 
 rootdirsects	resb	2
 bytesperclust	resb	2
-bitbufseg	resb	2
+		resb	2
 cmempool	resb	2
 cmempoollen	resb	2
 fattype		resb	1
@@ -5061,7 +5414,7 @@ descriptor	resb	1
 preserve_sp	resb	2		; Disk access slaughters these registers but we need them back _immediately_
 preserve_bp	resb	2		; These are accessed from cs but we build with cs = ds
 
-xmsaddr		resb	4
+xmsfunc		resb	4
 fatinbuf	resb	4
 fatinbitmask	resb	4
 bitmasklen	resb	2
@@ -5069,21 +5422,22 @@ wordsperchunk	resb	2
 
 totalfiles	resb	4
 foundfiles	resb	4
-mklostfndclust	resb	4
-		resb	4
-
-xmsfunc		resb	4
 bitbuflen	resb	2		; In entries
-pinseg		resb	2
-xmspinseg	resb	4
-		resb	4
+bitbufseg	resb	2
+xmspinseg	resb	2
+		resb	2
 
+bitbufsi	resb	2
+bitbufes	resb	2
 bitbuflow	resb	4
 bitbufhigh	resb	4
+bitbufoff	resb	4
+
+pinsi		resb	2
+pines		resb	2
 pinlow		resb	4
 pinhigh		resb	4
-
-
+pinoff		resb	4
 
 savedfilename	resb	16		; Saved file name and time (keep me on bottom)
 
@@ -5091,7 +5445,8 @@ _endbss:
 
 bitvectorlength	equ	0
 bitvectorptr	equ	4
-bitvectortype	equ	6
+bitvectortype	equ	8
+bitvectorrlen	equ	10
 
 b_mem_internal	equ	1
 b_mem_dos	equ	2
@@ -5106,8 +5461,8 @@ opflag_z	equ 8
 opflag2_bigdisk	equ 1
 opflag2_7305	equ 2
 opflag2_ebpb	equ 4
-opflag2_cbf	equ 8
-opflag2_rclust	equ 16
+opflag2_rclust	equ 8
+opflag2_sbcpin	equ 32
 opflag2_ulink	equ 64
 opflag2_a20	equ 128
 

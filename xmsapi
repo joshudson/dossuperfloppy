@@ -1,0 +1,240 @@
+XMS API calls:
+
+int 2Fh, AX=4300h	Check of XMS driver is present
+
+Returns: AL=80h if an XMS driver is present
+
+int 2Fh, AX=4310h	Get XMS function call
+
+Returns: ES:BX=address of XMS function (far call)
+
+call AH=00h		Get XMS version number
+
+Returns: AX = XMS version Number, BX = driver internal revision number,
+	 DX=1 if HMA exists, 0 if it does not
+
+call AH=01h		Request high memory area (HMA)
+Args: DX=      if the caller is a TSR or device driver, space needed in bytes
+      DX=FFFFh if the caller is an application
+Returns: AX=0001h if the HMA is assigned, 0000h if it is not
+Errors: BL=80h if the function is not implemented
+	BL=81h if a VDISK driver is detected
+	BL=90h if the HMA does not exist
+	BL=91h if the HMA is already in use
+	BL=92h if DX is less than the /HMAMIN argument to the XMS driver
+
+Note that the HMA is exactly FFF0 bytes in size.
+Pointers to the HMA may not be passed to DOS.
+Interrupt vectors must not point to the HMA.
+Disk I/O directly into the HMA is not recommended.
+Device drivers that can use HMA must implement a switch (such as /NOHMA)
+to avoid use of high memory, as it may be better utilized by another driver.
+
+call AH=02h		Release high memory area (HMA)
+Returns: AX=0001h if the HMA is release, 0000h if it is not
+Errors: BL=80h if the function is not implemented
+	BL=81h if a VDISK driver is detected
+	BL=90h if the HMA does not exist
+	BL=93h if the HMA was not allocated
+
+call AH=03h		Global Enable A20
+Returns: AX=0001h if the A20 line is enabled, 0000h otherwise
+Errors: BL=80h if the function is not implemented
+	BL=81h if a VDISK driver is detected
+	BL=82h if an A20 error occurs
+
+This function enables A20 for all processes. It should be used rarely.
+
+call AH=04h		Globlal Disable A20
+Returns: AX=0001h if the A20 line is disabled, 0000h otherwise
+Errors: BL=80h if the function is not implemented
+	BL=81h if a VDISK driver is detected
+	BL=82h if an A20 error occurs
+	BL=94h if the A20 line is still enabled
+
+One call to Global Disable A20 undoes all calls to Global Enable A20.
+
+Note that BL=94h is not actually an error. This occurs becasue A20
+is still enabled because of a call to Local Enable A20.
+
+call AH=05h		Local Enable A20
+Returns: AX=0001h if the A20 line is enabled, 0000h otherwise
+Errors: BL=80h if the function is not implemented
+	BL=81h if a VDISK driver is detected
+	BL=82h if an A20 error occurs
+
+This function enables A20 for the current process.
+Local disable A20 should be called before releasing control.
+
+call Ah=06h		Local Disable A20
+Returns: AX=0001h if the A20 line is disabled, 0000h otherwise
+Errors: BL=80h if the function is not implemented
+	BL=81h if a VDISK driver is detected
+	BL=82h if an A20 error occurs
+	BL=94h if the A20 line is still enabled
+
+One call to Local Disable A20 undoes one call to Local Enable A20.
+Note that BL=94h is not actually an error. When implementing the
+try/finally pattern, it is wisest to ignore all errors from this function.
+
+call AH=07h		Query A20
+Returns:	AX=0001h if the A20 line is physically enabled, 0000h otherwise.
+Errors:	BL=00h if the function succeeds
+	BL=80h if the function is not implemented.
+	BL=81h if a VDISK driver is detected
+
+This function checks if the A20 line is enabled by checking for memory wrap.
+It will return the correct status of A20 even if the driver can't toggle it
+or if another application left it in a strange state.
+
+call AH=08h		Query Free XMS Block
+Returns: AX=size of the largest free XMS block in kilobytes.
+	 DX=total amount of free extended memory
+Errors: BL=80h if the function is not implemented
+	BL=81h if a VDISK driver is dtected
+	BL=A0h if all extended memory is exhausted
+
+This function checks for how much memory can be allocated with 09h.
+
+call AH=09h		Allocate XMS Block
+Args: DX=Amount of extended memory being requested in kilobytes.
+Returns: AX=0001h if a handle is allocated, 0000h if otherwise
+	 DX=handle, or 0000h if not allocated
+Errors: BL=80h if the function is not implemented
+	BL=81h if a VDISK driver is dtected
+	BL=A0h if all extended memory is exhausted
+	BL=A1h if all handles are exhausted
+
+This function allocates XMS memory. Allocating 0 bytes is valid
+and reserves a handle.
+
+call AH=0Ah		Free XMS Block
+Args: DX=Handle to the allocated block
+Returns: AX=0001h if the handle is freed, 0000h otherwise
+Errors: BL=80h if the function is not implemented
+	BL=81h if a VDISK driver is dtected
+	BL=82h if the handle is invalid
+	BL=83h if the handle is locked
+
+call AH=0Bh		Move XMS Block
+Args: DS:SI=pointer to XMS move structure
+Errors: BL=80h if the function is not implemented
+	BL=81h if a VDISK driver is dtected
+	BL=82h if an A20 error occurs
+	BL=A3h if the source handle is invalid
+	BL=A4h if the source offset is out of range
+	BL=A5h if the dest handle is invalid
+	BL=A6h if the dest offset is out of range
+	BL=A7h if the length is invalid
+	BL=A8h if the move has an overlap requiring backwards move
+	BL=A9h if a parity error occurs
+
+	ExtMemMoveStruct struc
+		Length		dd ?
+		SourceHandle	dw ?
+		SourceOffset	dd ?
+		DestHandle	dw ?
+		DestOffset	dd ?
+	ExtMemMoveStruct ends
+
+Forwards-copy overlaps are required to be supported.
+Backwards-copy overlaps are not, and may error with A8h.
+It is not required to implement odd lengths, and most
+drivers do not; however at least one driver does.
+Alignment is not required, however WORD alignment is faster.
+DWORD alignment is even faster on 386+ machines.
+This function is guaranteed to provide a reasonable number of
+interrupt windows during long transfers.
+
+call AH=0Ch		Lock XMS Block
+Args: DX=extended memory block
+Returns: AX=0001h if the block is locked, 0000h otherwise.
+	DX:BX=the 32 bit linear address of the block
+Errors: BL=80h if the function is not implemented
+	BL=81h if a VDISK driver is dtected
+	BL=82h if an A20 error occurs
+	BL=A2h if the handel is invalid
+	BL=ACh if the block's lock count overflows
+	BL=ADh if the lock fails
+
+This function returns a 32 bit pointer to the extended memory block.
+The pointer is valid as long as the block is locked.
+
+It is neither necessary nor useful to lock a block before calling
+copy memory.
+
+The size of the lock counter is one byte.
+
+call AH=0Dh		Unlock XMS Block
+Args: DX=handle
+Errors: BL=80h if the function is not implemented
+	BL=81h if a VDISK driver is dtected
+	BL=82h if an A20 error occurs
+	BL=A2h if the handle is invalid
+	BL=AAh if the handle is not locked
+
+call AH=0Eh		Get extended memory handle information
+Args: DX=handle
+Returns: AX=0001h if the block's information is found, 0000h otherwise
+	BH=The block's lock count
+	BL=Number of free handles
+	DX=The block's length in kilobytes
+Errors: BL=80h if the function is not implemented
+	BL=81h if a VDISK driver is dtected
+	BL=A2h if the handel is invalid
+
+call AH=0Fh		Rellocate Extended Memory Block
+Args: BX=new size of the block
+      DX=unlocked extended memory block handle
+Returns: AX=0001h if the block is reallocated, 0000h otherwise
+Errors: BL=80h if the function is not implemented
+	BL=81h if a VDISK driver is dtected
+	BL=82h if an A20 error occurs
+	BL=A0h if all extended memory is exhausted
+	BL=A1h if all handles are exhausted
+	BL=A2h if the handle is invalid
+	BL=ABh if the block is locked
+
+call Ah=10h		Request Upper Memory Block
+Args: DX=size of the requested memory block
+Returns: AX=0001h if the request is granted, 0000h otherwise
+	 BX=segment of the upper memory block
+	 DX=actual size in paragraphs if allocated, largest available size if not
+Errors: BL=80h if the function is not implemented
+	BL=B0h if a smaller UMB is available
+	BL=B1h if no UMBs are available
+
+By definition, UMBs are below the 1MB boundary.
+UMBs are paragarph aligned.
+To determine the size of the largest free UMB, request FFFF paragraphs.
+UMBs are unaffected by EMS calls (or other XMS calls for that matter).
+
+call AH=11h		Release Upper Memory Block
+Args: DX=segment of upper memory block
+Returns: AH=0001h if the block was release, 0000h otherwise
+Errors: BL=80h if the function is not implemented
+	BL=B2h if the UMB segment number is invalid
+
+Yes, the same error code means the same thing everywhere.
+Yes, 83h and ABh mean the same thing. This looks like a mistake in
+the original spec, but might not be. Error codes fall in regions.
+
+The description of the XMS API was drawn from multiple sources,
+with the official spec being one of them.
+
+int 2fh AX=4A01h	Query HMA free space
+Args: BX=0000h
+Returns: ES:DI=Address of free space in HMA
+	 BX=number of bytes free
+
+When DOS=HIGH is used, this checks how much HMA space is left over.
+
+It appears to work with arbitrary BX as input; however if BX is not zero
+on input, you don't know if the API exists or not.
+
+BX is short by one byte on some operating systems.
+
+int 2fh AX=4A02h	Perform HMA suballocation
+Args: BX=requested size
+Returns: ES:DI=Address of newly allocated space in the HMA
+	 or FFFF:FFFF for DOS is not high or no space available.
