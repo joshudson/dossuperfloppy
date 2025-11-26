@@ -669,7 +669,7 @@ initpools:
 	jmp	.cbigr
 %endif
 	or	dx, dx
-	jnz	short .cbigr
+	jnz	strict short .cbigr
 	mov	di, ds
 	add	di, [cmem]
 	sub	di, ax
@@ -3748,7 +3748,7 @@ recoverdirs:
 	pop	dx
 	pop	ax
 	cmp	ch, 2
-	jne	short	.f_ret
+	jne	strict short	.f_ret
 	jmp	recoverdirs		; Still hanging: something up the chain must have not been a directory after all
 .create	mov	[savedfilename + 8], ax		; Save location for descendtree
 	mov	[savedfilename + 10], dx
@@ -4341,30 +4341,26 @@ bitsclustcommon:
 	jc	.cache
 	mov	si, pinsi
 	call	isbitsclustcommon
-	jnc	.scan
-.cache	test	ch, byte 2
-	jz	.cnr
-	or	[si], byte 1
-.cnr	mov	es, [si + 2]
-	sub	dx, [si + 6]
-	sub	ax, [si + 4]
-	xor	bx, bx
-	jmp	.thisc
-.scan	push	dx
+	jc	.cache
+	push	dx
 	push	ax
+	push	di
+	xor	bx, bx
+	xor	di, di	; BX:DI = base sector
 	mov	si, bitvectorptrs
 .loop	cmp	[si + bitvectorlength + 2], dx
 	ja	.this
 	jb	.next
 	cmp	[si + bitvectorlength], ax
 	jae	.this
-.next	sub	ax, [si + bitvectorlength]
+.next	add	di, [si + bitvectorlength]
+	adc	bx, [si + bitvectorlength + 2]
+	sub	ax, [si + bitvectorlength]
 	sbb	dx, [si + bitvectorlength + 2]
 	add	si, bitvectorrlen
 	jmp	.loop
-.this	cmp	[si + bitvectortype], byte b_mem_xms
-	je	.xms
-	ja	.fault
+.this	push	bx
+	push	di
 	push	si
 	push	cx
 	mov	si, bitbufsi
@@ -4374,45 +4370,54 @@ bitsclustcommon:
 .fbuf	call	swapbitsclustcommon
 	pop	cx
 	test	ch, byte 2
-	jc	.fcln
+	jz	.fcln
 	or	[si], byte 1
-.fcln	pop	si
-	add	sp, 4
-	les	bx, [si + bitvectorptr]		; It's addressible memory
-.thisc	call	.bytoff
+.fcln	add	sp, 6
+	pop	di
+	pop	ax
+	pop	dx
+.cache	test	ch, byte 2
+	jz	.cnr
+	or	[si], byte 1
+.cnr	sub	ax, [si + 6]
+	sbb	dx, [si + 8]
+.thisc	mov	cl, al
+	and	cl, 3
+	shl	cl, 1
+	les	bx, [si + 2]			; It's addressible memory
+	shr	dx, 1
+	rcr	ax, 1
+	shr	dx, 1
+	rcr	ax, 1
 	add	bx, ax
 	adc	dx, 0
+	push	cx
 	mov	ax, es
 	mov	cl, 12
 	shl	dx, cl
 	add	ax, dx
+	pop	cx
 	mov	es, ax
 	ret
-.bytoff	shr	dx, 1
-	rcr	ax, 1
-	shr	dx, 1
-	rcr	ax, 1
-.xms	int3	; TODO fetch from XMS
-.fault	int3	; FIXME
 
 	; DX:AX = cluster, SI = pointer to cache control record
 isbitsclustcommon:
-	cmp	dx, [si + 6]
+	cmp	dx, [si + 8]
 	jb	.no
 	ja	.ab
-	cmp	ax, [si + 4]
+	cmp	ax, [si + 6]
 	jb	.no
 .ab	cmp	dx, [si + 10]
 	ja	.no
 	jb	.yes
-	cmp	ax, [si + 8]
+	cmp	ax, [si + 12]
 	jae	.no
 .yes	stc
 	ret
 .no	clc
 	ret
 
-	; DX:AX = offset into selected, SI = pointer to cache control record, on stack = skipped, new record pointer, cluster
+	; DX:AX = offset into selected, SI = pointer to cache control record, on stack = skipped, new record pointer, base cluster
 	; Stack arguments remain on stack, trashes BX, CX
 swapbitsclustcommon:
 	push	bp
@@ -4425,9 +4430,7 @@ swapbitsclustcommon:
 	and	bx, 7FFFh
 	cmp	[bx + bitvectortype], byte b_mem_xms
 	jb	.clean
-	push	ax
-	push	dx
-	mov	es, [si + 2]	; XMS write up
+	mov	es, [si + 4]	; XMS write up
 	xor	ax, ax
 	mov	[xms_xfer_src], word ax
 	mov	[xms_xfer_srcoff], word ax
@@ -4443,8 +4446,6 @@ swapbitsclustcommon:
 	mov	si, xms_xfer_len
 	call	far [xmsfunc]
 	pop	si
-	pop	dx
-	pop	ax
 .clean	mov	bx, [bp + 6]
 	test	bx, bx
 	jnz	.useful
@@ -4459,12 +4460,12 @@ swapbitsclustcommon:
 	call	.load
 	mov	ax, [bp + 8]
 	mov	dx, [bp + 10]
-	mov	[si + 4], ax
-	mov	[si + 6], dx
+	mov	[si + 6], ax
+	mov	[si + 8], dx
 	add	ax, [bx + bitvectorlength]
 	adc	dx, [bx + bitvectorlength + 2]
-	mov	[si + 8], ax
-	mov	[si + 10], dx
+	mov	[si + 10], ax
+	mov	[si + 12], dx
 	jmp	.ret
 .fault	mov	si, bx
 	jmp	scanbitsclust.fault
@@ -4475,11 +4476,11 @@ swapbitsclustcommon:
 	or	ax, cx
 	xor	ax, cx
 	inc	cx
-	mov	[si + 4], ax
-	mov	[si + 6], dx
+	mov	[si + 6], ax
+	mov	[si + 8], dx
 	add	ax, cx		; Cannot overflow
-	mov	[si + 8], ax
-	mov	[si + 10], dx
+	mov	[si + 10], ax
+	mov	[si + 12], dx
 	sub	ax, cx
 	call	.load
 	shr	dx, 1		; Compute offset into XMS buffer
@@ -4488,31 +4489,29 @@ swapbitsclustcommon:
 	ror	ax, 1
 	mov	[si + 12], ax
 	mov	[si + 14], dx
-	mov	es, [si + 2]	; XMS read down
+	mov	[xms_xfer_srcoff], ax
+	mov	[xms_xfer_srcoff + 2], dx
+	mov	es, [si + 4]	; XMS read down
 	xor	ax, ax
 	mov	[xms_xfer_dst], ax
 	mov	[xms_xfer_dstoff], ax
 	mov	[xms_xfer_dstoff + 2], es
 	mov	ax, [bx + bitvectorptr]
 	mov	[xms_xfer_src], ax
-	mov	ax, [si + 12]
-	mov	dx, [si + 14]
-	mov	[xms_xfer_srcoff], ax
-	mov	[xms_xfer_srcoff + 2], dx
 	push	si
 	mov	ah, 0Bh
 	mov	si, xms_xfer_len
 	call	far [xmsfunc]
 	pop	si
-.ret	pop	ax
+.ret	pop	ax			; We saved them for ourselves
 	pop	dx
 	pop	bp
 	ret
 .load	mov	[si], bx
 	mov	cx, [bx + bitvectorptr]
-	mov	[si], cx
-	mov	cx, [bx + bitvectorptr + 2]
 	mov	[si + 2], cx
+	mov	cx, [bx + bitvectorptr + 2]
+	mov	[si + 4], cx
 	ret
 
 	; Locate all entries matching a pattern
@@ -4608,13 +4607,13 @@ scanbitsclust:
 	mov	si, pinsi
 .scan2	call	swapbitsclustcommon
 	pop	cx
-	add	sp, 2		; we need cache (still in si) not record selected
+	pop	dx		; we need cache (still in si) not record selected
 	pop	dx
 	pop	ax
-.cache	mov	di, [si + 8]
-	mov	bx, [si + 10]
-	sub	di, [si + 4]
-	sbb	bx, [si + 6]
+.cache	mov	di, [si + 10]
+	mov	bx, [si + 12]
+	sub	di, [si + 6]
+	sbb	bx, [si + 8]
 	call	.div2ceil	; 4 entries per byte
 	call	.div2ceil
 	mov	es, [si + 2]
@@ -5316,11 +5315,11 @@ query_clustone	db	"Encountered mid-allocation cluster value, repair?$"
 query_freealloc	db	"Encountered free block in use, allocate?$"
 query_clustout	db	"Encountered out-of-range cluster value, repair?$"
 query_xlink	db	"Encountered cross-linked cluster, repair?$"
-query_badname	db	"has invalid filename characters, fix?$"
-query_resname	db	"is a reserved name, auto rename?$"
-query_anomfile	db	"is an anomalous directory entry, delete?$"
-query_freefile	db	"refers to a free cluster, delete?$"
-query_xlinkfile	db	"refers to a crosslinked cluster, delete?$"
+query_badname	db	" has invalid filename characters, fix?$"
+query_resname	db	" is a reserved name, auto rename?$"
+query_anomfile	db	" is an anomalous directory entry, delete?$"
+query_freefile	db	" refers to a free cluster, delete?$"
+query_xlinkfile	db	" refers to a crosslinked cluster, delete?$"
 query_dirnot	db	" is marked as a directory but seems to not be, select(F,D)$"
 query_fixemptyd	db	" is marked as a directory but is an empty file, fix?$"
 query_fixdotdot	db	" has a broken .. entry, fix?$"
@@ -5423,21 +5422,25 @@ wordsperchunk	resb	2
 totalfiles	resb	4
 foundfiles	resb	4
 bitbuflen	resb	2		; In entries
-bitbufseg	resb	2
-xmspinseg	resb	2
 		resb	2
+		resb	4
 
+bitbufseg	resb	2
 bitbufsi	resb	2
+bitbufbx	resb	2
 bitbufes	resb	2
 bitbuflow	resb	4
 bitbufhigh	resb	4
 bitbufoff	resb	4
-
+xmspinseg	resb	2
 pinsi		resb	2
+pinbx		resb	2
 pines		resb	2
 pinlow		resb	4
 pinhigh		resb	4
 pinoff		resb	4
+		resb	4
+		resb	4
 
 savedfilename	resb	16		; Saved file name and time (keep me on bottom)
 
