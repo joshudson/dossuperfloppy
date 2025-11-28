@@ -63,9 +63,6 @@ stackbottom	equ	(_endbss - _bss + _end - _start + 100h + 768)
 ; ... additional bitmap pool in UMBs if they exist
 ; ... additional bitmap pool in XMS if it exists
 
-%define FORCE_API
-%define NO_HIGH_MEM
-
 _start:
 	cld
 	; Check size of DOS memory block we are in
@@ -898,6 +895,11 @@ initpools:
 	shr	bx, 1
 	shr	bx, 1
 	mov	[xms_xfer_len], bx
+	dec	bx			; Allocation mask, usually 0
+	mov	cl, 10			; but can be as big as 3
+	shr	bx, cl
+	not	bx
+	mov	[xms_xfer_dst], bx	; stuff in dst handle
 	mov	es, [bitbufseg]
 	push	ax
 	xor	di, di
@@ -913,7 +915,7 @@ initpools:
 	push	dx
 	mov	ah, 8
 	call	far [xmsfunc]
-	or	ax, ax
+	and	ax, [xms_xfer_dst]
 	jz	.nomorehmemp		; All out
 	mov	cx, dx
 	mov	ah, 9
@@ -1236,7 +1238,7 @@ stage_fat:
 	jb	.fat_block_loop
 .set_root_clust_top:
 	call	checkrootclustno
-	mov	cl, 2		; Root cluster is reached
+	mov	ch, 2		; Root cluster is reached
 	call	setbitsclust
 
 .fat_block_loop:
@@ -1420,7 +1422,7 @@ stage_fat:
 	mov	[rootclust], ax
 	mov	[rootclust + 2], dx
 	call	checkrootclustno
-	mov	cl, 2
+	mov	ch, 2
 	call	setbitsclust
 	jmp	.secondfinish
 .secondnormal:
@@ -1459,7 +1461,7 @@ stage_fat:
 .endchain:
 	mov	ax, [bp - 6]
 	mov	dx, [bp - 4]
-	mov	cl, 2
+	mov	ch, 2
 	call	setbitsclustdi
 	jmp	.clustdonenotfree
 .notfixendchain:
@@ -1485,7 +1487,7 @@ stage_fat:
 	jne	.notbadblock
 	mov	ax, [bp - 6]
 	mov	dx, [bp - 4]
-	mov	cl, 3		; It's bad; therefore it's accounted for all by itself
+	mov	ch, 3		; It's bad; therefore it's accounted for all by itself
 	call	setbitsclustdi
 	jmp	.clustdone
 .notbadblock:
@@ -1496,7 +1498,7 @@ stage_fat:
 	push	ax
 	mov	ax, [bp - 6]
 	mov	dx, [bp - 4]
-	mov	cl, 2
+	mov	ch, 2
 	call	setbitsclustdi
 	pop	ax
 	pop	dx
@@ -1547,7 +1549,7 @@ stage_fat:
 	sbb	[freeclust + 2], word 0
 	push	dx
 	push	ax
-	mov	cl, 2
+	mov	ch, 2
 	call	setbitsclust
 	pop	ax
 	pop	dx
@@ -1600,7 +1602,7 @@ stage_fat:
 .nofixxlink:
 	jmp	.clustdonenotfree
 .firstallocfound:
-	mov	cl, 1
+	mov	ch, 1
 	call	setbitsclust
 
 .clustdonenotfree:
@@ -1920,7 +1922,7 @@ outax:
 	ret
 
 ; Displays a checkmark
-checkmark:	ret
+checkmark:
 	push	ax
 	push	dx
 	mov	dx, out_check
@@ -2573,7 +2575,7 @@ descendtree:
 	jz	.scanbits_free
 	test	ch, 1
 	jnz	.scanbits_xlink
-	mov	cl, 1
+	mov	ch, 1
 	pop	dx
 	pop	ax
 	push	ax
@@ -3543,7 +3545,13 @@ alloccluster:
 	int	21h
 	mov	al, error_nofix
 	jmp	exit
-.found	call	scanbitsclust.unwind
+.found	cmp	dx, [highestclust + 2]	; When scanning for zeros, scanbitsclust can return
+	jb	.found2			; a few cells too many. Don't try to allocate them.
+	ja	.never
+	cmp	ax, [highestclust]
+	jb	.found2
+.never	ret
+.found2	call	scanbitsclust.unwind
 	mov	sp, bp		; longjmp!
 	pop	bp
 	pop	cx		; Trash
@@ -3753,7 +3761,7 @@ recoverdirs:
 	mov	dx, [savedfilename + 2]
 	push	ax
 	push	dx
-	mov	cl, 1
+	mov	ch, 1
 	call	setbitsclust	; It's reached now
 	pop	dx
 	pop	ax
@@ -4322,14 +4330,16 @@ incrementprogress:	; DI=pointer to total, destroys nothing
 	ret
 .u	cmp	[pgdisplay], byte 99	; Prevent infinite loop on division by 0 (empty fs)
 	je	.n
+.c	cmp	[pgdisplay], byte 99
+	je	.d
 	inc	byte [pgdisplay]
 	sub	ax, [di]
 	sbb	dx, [di + 2]
 	cmp	dx, [di + 2]
-	ja	.u
+	ja	.c
 	jb	.d
 	cmp	ax, [di]
-	jae	.u
+	jae	.c
 .d	mov	al, [pgdisplay]
 	aam
 	xchg	al, ah
@@ -4356,7 +4366,7 @@ incrementprogress:	; DI=pointer to total, destroys nothing
 getbitsclustdi:
 	add	ax, di
 	adc	dx, 0
-	mov	ch, 1
+	mov	ch, 10h
 	jmp	getbitsclust.e2
 	;DX:AX = base cluster
 getbitsclust:
@@ -4369,41 +4379,35 @@ getbitsclust:
 	and	ch, 3
 	ret
 
-	; bits to set in bottom two bits of CL
+	; bits to set in bottom two bits of CL, high four bits must be clear
 setbitsclustdi:
 	add	ax, di
 	adc	dx, 0
-	mov	ch, 3
+	or	ch, 30h
 	jmp	setbitsclust.e2
 setbitsclust:
-	mov	ch, 2
+	or	ch, 20h
 .e2	push	es
-	push	cx
 	call	bitsclustcommon
-	pop	ax
-	shl	al, cl
-	or	[es:bx], al
+	and	ch, 3
+	shl	ch, cl
+	or	[es:bx], ch
 	pop	es
 	ret
 
-	; bits to clear are set in bottom two bits of CL
-clearbitsclustdi:
-	add	ax, di
-	adc	dx, 0
-	mov	ch, 3
-	jmp	clearbitsclust.e2
+%ifdef NOTDEF	; Surprisingly, no callers yet
+	; bits to clear are set in bottom two bits of CL, high four bits must be clear
 clearbitsclust:
-	mov	ch, 2
-.e2	push	es
-	push	cx
+	or	ch, 20h
+	push	es
 	call	bitsclustcommon
-	pop	ax
-	and	al, 3
-	shl	al, cl
-	not	al
-	and	[es:bx], al
+	and	ch, 3
+	shl	ch, cl
+	not	ch
+	and	[es:bx], ch
 	pop	es
 	ret
+%endif
 
 bitsclustcommon:
 	mov	si, bitbufsi
@@ -4427,18 +4431,18 @@ bitsclustcommon:
 .this	push	si
 	push	cx
 	mov	si, bitbufsi
-	test	ch, byte 1
+	test	ch, byte 10h
 	jz	.fbuf
 	mov	si, pinsi
 .fbuf	call	swapbitsclustcommon
 	pop	cx
-	test	ch, byte 2
+	test	ch, byte 20h
 	jz	.fcln
 	or	[si], byte 1
 .fcln	pop	ax		; Not used
 	pop	ax
 	pop	dx
-.cache	test	ch, byte 2
+.cache	test	ch, byte 20h
 	jz	.cnr
 	or	[si], byte 1
 .cnr	sub	ax, [si + 6]
@@ -4453,6 +4457,7 @@ bitsclustcommon:
 	rcr	ax, 1
 	add	bx, ax
 	adc	dx, 0
+	jz	.nadj
 	push	cx
 	mov	ax, es
 	mov	cl, 12
@@ -4460,7 +4465,7 @@ bitsclustcommon:
 	add	ax, dx
 	pop	cx
 	mov	es, ax
-	ret
+.nadj	ret
 
 	; DX:AX = cluster, SI = pointer to cache control record
 isbitsclustcommon:
@@ -4739,11 +4744,7 @@ scanbitsclust:
 	pop	bx
 	ret
 
-.match	cmp	dx, [highestclust + 2]	; Skip garbage entries at end of list (up to 3 possible)
-	jb	.matchx
-	cmp	ax, [highestclust]
-	je	.matchr
-.matchx	push	ax			; Yes we save every single register. We're using them.
+.match	push	ax			; Yes we save every single register. We're using them.
 	push	bx			; Caller will make absolute hash of them repairing
 	push	cx			; stuff anyway. Might as well write register save once.
 	push	dx
