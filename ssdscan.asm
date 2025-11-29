@@ -669,7 +669,7 @@ initpools:
 	jmp	.cbigr
 %endif
 	or	dx, dx
-	jnz	strict short .cbigr
+	jnz	short .cbigr
 	mov	di, ds
 	add	di, [cmem]
 	sub	di, ax
@@ -942,7 +942,7 @@ initpools:
 	pop	ax
 	sub	ax, bx
 	sbb	dx, di
-	jc	strict short .xmnuf
+	jc	short .xmnuf
 	jnz	.xmsalloc
 	or	ax, ax
 	jnz	.xmsalloc
@@ -1979,9 +1979,15 @@ getnextcluster:
 .worker xor	cx, cx
 	push	di
 .loop	push	cx
+	push	ax
+	push	dx
 	call	diskread0
+	pop	dx
+	pop	ax
 	pop	cx
 	jnc	.found
+	add	ax, [sectsperfat]
+	adc	dx, [sectsperfat + 2]
 	inc	cl
 	cmp	cl, [numfats]
 	jb	.loop
@@ -2393,26 +2399,78 @@ descendtree:
 	ret
 
 .scanlfnsubsequent:
+	mov	al, [es:bx]
+	cmp	al, 0			; Check for deleted/empty record
+	je	.scanlfnremovev		; CF is clear if equal
+	cmp	al, 0E5h
+	je	.scanlfnremovev
 	cmp	[es:bx + 0Bh], byte 0Fh
-	je	.scanlfnentry
+	je	.scanlfnentrysubsequent
 	cmp	[bp - 10], byte 1	; Not an LFN entry; check if LFN ended at end of sequence
-	je	.scanlfnaccept
+	je	.scanlfnchkname
+.scanlfnremovevprev:
 	clc
+.scanlfnremovev:
 	jmp	.scanlfnremove
-.scanlfnaccept:
+.scanlfnremovevthis:
+	clc
+	jmp	.scanlfnremovev
+.scanlfnentrysubsequent:
+	test	al, 80h			; LFN entries can't have this set
+	jnz	.scanlfnremovevthis
+	test	al, 40h
+	jnz	.scanlfnremovevprev	; It's a new LFN entry on top of an old one
+	and	al, 3Fh
+	mov	ah, [es:bx + 0Dh]
+	cmp	ah, [vfatsum]		; Clearly all entries must refer to the same
+	jne	.scanlfnremovevthis	; and therefore have the same base checksum
+	mov	ah, [bp - 10]
+	dec	ah
+	jz	.scanlfnremovevthis
+	cmp	ah, al
+	jne	.scanlfnremovevthis
+	mov	[bp - 10], ah
+	jmp	.skipentry
+
+.scanlfnchkname:
+	mov	al, 0
+	mov	cx, 11
+.vfatsumloop:				; Check if short entry has been replaced
+	ror	al, 1
+	add	al, [es:bx]
+	inc	bx
+	loop	.vfatsumloop
+	sub	bx, 11
+	cmp	al, [vfatsum]		; If the name sum doesn't match what the VFAT
+	jne	.scanlfnremovevprev	; entry says it is, the file was deleted and
+					; a new file was created in the same spot
+					; or the file was renamed. In either case,
+					; the old long name isn't valid.
 	mov	al, [es:bx]
 	cmp	al, byte 0
-	je	.scanlfnremove	; CF is clear if E
+	je	.scanlfnremovev	; CF is clear if E
 	cmp	al, byte 0E5h
-	je	.scanlfnremove
+	je	short .scanlfnremovev
 	mov	[bp - 26], byte 0
 	mov	[bp - 10], byte 0
 	jmp	.scannormal_entry
+.scanlfnremove1:
+	jmp	.scansetnormal_delete
 .scanvolume:
 	cmp	[es:bx + 0Bh], byte 0Fh
-	jne	.scanlfnskipentryv	; It's not an LFN entry
-.scanlfn:			; It's an LFN entry. We remove stale LFN entries.
+	jne	short .scanlfnskipentryv	; It's not an LFN entry
+.scanlfnfirst:			; It's an LFN entry. We remove stale LFN entries.
+	mov	al, [es:bx]
+	test	al, byte 80h
+	jnz	.scanlfnremove1	; LFN must not have this bit set ever
+	test	al, byte 40h
+	jz	.scanlfnremove1	; Started with subsequent LFN
+	and	al, 3Fh
+	jz	.scanlfnremove1	; Sequence number started with 0
+	mov	[bp - 10], al
 	mov	[bp - 26], byte 12
+	mov	ah, [es:bx + 0Dh]
+	mov	[vfatsum], ah
 	mov	es, [buf4seg]
 	mov	ax, [es:si + 4]	; Set up unwind
 	mov	dx, [es:si + 6]
@@ -2420,31 +2478,8 @@ descendtree:
 	mov	[bp - 14], dx
 	mov	dx, [es:si + 8]
 	mov	[bp - 12], dx
-	mov	es, [buf2seg]
-.scanlfnentry:
-	mov	al, [es:bx]
-	cmp	al, 0E5h
-	je	.scanlfnremove	; CF is clear if E
-	cmp	al, 0
-	je	.scanlfnremove
-	test	al, byte 40h	; Flag marking first LFN entry
-	jz	.scanlfnnext
-	test	[bp - 10], byte 0FFh
-	jnz	.scanlfnremove	; LFN on top of LFN -- prior LFN chain is bad
-	and	al, 3Fh
-	jz	.scanlfnremovethis
-	mov	[bp - 10], al
 .scanlfnskipentryv:
 	jmp	.skipentry	; It's a volume label. Nothing to do.
-
-.scanlfnnext:
-	mov	ah, [bp - 10]
-	dec	ah
-	jz	.scanlfnremovethis
-	cmp	ah, al
-	jne	.scanlfnremovethis
-	mov	[bp - 10], ah
-	jmp	.scanlfnskipentryv
 
 .scanlfnremovethis:
 	stc
@@ -2484,6 +2519,8 @@ descendtree:
 .scansetnormal_delete:
 	mov	[es:bx], byte 0E5h	; Auto-repair all ones entry (recovered bad sector *properly*)
 	mov	[es:bx + 0Dh], byte 0E5h
+	mov	[es:bx + 14h], word 0
+	mov	[es:bx + 1Ah], word 0
 	or	[bp - 9], byte 2	; set dirty bit
 	jmp	.skipentry
 .scansetnormal_notallones:
@@ -2550,7 +2587,7 @@ descendtree:
 .scannormal_notdirectory_empty:
 	mov	cx, [es:bx + 1Ch]
 	or	cx, [es:bx + 1Eh]
-	jnz	.scannormal_notdirectory_empty0
+	jz	.scannormal_notdirectory_empty0
 	mov	dx, query_fixbadlen
 	call	.queryfixentry
 	cmp	al, 'y'
@@ -3049,10 +3086,7 @@ descendtree:
 
 .dirwritebackifdirty:
 	test	[bp - 9], byte 2
-	jnz	.dirwriteback
-	ret
-	
-.dirwriteback:
+	jz	.dirisnotdirty
 	and	[bp - 9], byte 0FDh
 	mov	dx, [bp - 36]	; BP - 38 = sector of current dir cluster
 	mov	ax, [bp - 38]
@@ -3064,6 +3098,8 @@ descendtree:
 	call	diskwrite0
 	pop	di
 	pop	si
+	mov	es, [buf4seg]
+.dirisnotdirty:
 	ret
 
 .queryfixentry:
@@ -3778,7 +3814,7 @@ recoverdirs:
 	pop	dx
 	pop	ax
 	cmp	ch, 2
-	jne	strict short	.f_ret
+	jne	short	.f_ret
 	jmp	recoverdirs		; Still hanging: something up the chain must have not been a directory after all
 .create	mov	[savedfilename + 8], ax		; Save location for descendtree
 	mov	[savedfilename + 10], dx
@@ -4379,7 +4415,7 @@ getbitsclust:
 	and	ch, 3
 	ret
 
-	; bits to set in bottom two bits of CL, high four bits must be clear
+	; bits to set in bottom two bits of CH, high four bits must be clear
 setbitsclustdi:
 	add	ax, di
 	adc	dx, 0
@@ -4396,7 +4432,7 @@ setbitsclust:
 	ret
 
 %ifdef NOTDEF	; Surprisingly, no callers yet
-	; bits to clear are set in bottom two bits of CL, high four bits must be clear
+	; bits to clear are set in bottom two bits of CH, high four bits must be clear
 clearbitsclust:
 	or	ch, 20h
 	push	es
@@ -5409,7 +5445,6 @@ query_recfile	db	"Found lost file $"
 query_recq	db	".CHK, recover?$"
 msg_hdbaddesc	db	"Invalid media descriptor; FAT16 and FAT32 must use F8 or FF", 13, 10, '$'
 msg_nogoodfat	db	"Correlated bad sectors destroyed FAT.", 13, 10, '$'
-msg_rootdirlost	db	"Root directory lost", 13, 10, '$'
 msg_toodeep	db	"Directory tree depth exceed 51; cannot ccontinue.", 13, 10, '$'
 msg_2bigfile	db	" exceeds 4GB by traversal. In the vain hope", 13, 10
 		db	"you have an OS that can read this, repair (truncate) will not be performed.", 13, 10, '$'
@@ -5499,7 +5534,7 @@ totalfiles	resb	4
 progress	resb	4
 bitbuflen	resb	2		; In entries
 pgdisplay	resb	1
-		resb	1
+vfatsum		resb	1
 		resb	4
 
 bitbufseg	resb	2
