@@ -1,0 +1,257 @@
+The MBR:
+
+Address  Size Description
+0000        2 xor ax, ax
+0002      216 Bootstrap code area (part 1)
+00DA(218)   2 zero
+00DC(220)   1 original BIOS drive (80-FF)
+00DD(221)   1 second
+00DE(222)   1 minute
+00DF(223)   1 hour
+00E0(224) 216 Bootstrap code area (part 2)
+01B8(440)   4 Disk Signature
+01BC(444)   2 copy protect flag (0=clear, 5A5A=protect)
+01BE(446)  16 table entry 1
+01CE(462)  16 table entry 1
+01DE(478)  16 table entry 1
+01EE(494)  16 table entry 1
+01FE(510)   1 55
+01FF(511)   1 AA
+
+If the sector size is > 512 bytes, the 55 and AA are repeated at the end.
+It's not clear how to interpred the LBA addresses if sector size is not
+512 bytes. In practice, BIOS LBA lies and so 512 byte sectors even when they
+aren't and so everybody plays along.
+
+In theory, there are no recognition bytes for the MBR; but in practice,
+modern BIOSes started checking anyway, Normally, they check for the
+xor ax, ax instruction (either 33 C0 or 31 C0).
+
+The idea behind DC-DF is they are initialized to zero by formatting tools,
+and Windows 95 is allowed to populate them. This passes the 16 bit disk
+identity to the 32 bit kernel.
+
+Partition table entry:
+
+Offset Size Desc
+0      1    boot flag, 0 not bootable, >=80 bootable, 1-7F invalid
+1      3    CHS address of starting of partition sector
+            1 byte dh, head
+            1 byte cl, bottom six bits=sector, top 2 bits=high bits of cyl
+            1 byte ch, bottom 8 bits of cyl
+4      1    partition type
+5      3    CHS address of last sector in partition
+8      4    LBA address of first absolute sector of partition
+C(12)  4    Number of sectors in partition
+
+Important partition types
+01   FAT12 within first 32MB of disk
+04   FAT16 with less than 65536 sectors, FAT12 not within first 32MB of disk
+05   EBR using CHS addressing (must fit entirely within CHS addresses)
+06   FAT16 bigger than 65536 sectors, still using CHS addressing
+07   HPFS/NTFS/exFAT
+0B   FAT32 using CHS addressing
+0C   FAT32 using LBA addressing
+0E   FAT16 or FAT12 using LBA addressing
+0F   EBR using LBA addressing
+11   Hidden FAT12
+14   Hidden FAT16
+16   Hidden FAT16
+1B   Hidden FAT32
+1C   Hidden FAT32
+1E   Hidden FAT16
+80   Old Minix
+81   Minix
+82   Linux Swap
+83   Any native Linux filesystem
+B0   FAT repair utility created by SSDFMT (CHS)
+B5   FAT repair utility created by SSDFMT (LBA)
+
+FAT file system:
+Variables N: number of reserved sectors
+          SS: sector size
+          F: number of FATs
+          RE: root directory entries
+          SF: number of sectors in FAT
+          SPC: sectors per cluster
+          T: total sectors
+          R: root directory sectors =ceil(RE*16/SS)
+          C: clusters = (T-F*SF-N-R) / SPC
+N       reserved sectors
+F*SF    fat sectors
+R       root directory sectors
+C*SPC   data sectors
+
+The first reserved sector is the boot sector, which also holds the BPB.
+Additional reserved sectors may hold backup boot sectors.
+
+BIOS Parameter Block:
+
+Address Length Meaning
+000     3      JMP instruction; must be EB xx 90 or E9 xx 00
+               DOS also checks for 69, which was an unintneded
+               alias for JNC on the original 8086 processor.
+               It is not valid to determine the length of the BPB
+               by looking at the JMP instruction. Some tools
+               reserve extra data bytes, and others write EB FE 90.
+003     8      Was supposed to be tool that formatted it; however
+               due to checking for known good tools rather than known
+               broken ones, ancient DOS rejects other than IBM  2.0
+00B     2      Bytes per logical sector
+00D     1      Sectors per cluster, allowed vaues are 1,2,4,8,16,32,64,128.
+               Some versions of DOS do not permit > 4KB clusters.
+               Most DOS can't handle > 32KB clusters for the obvious reason.
+00E     2      Number of reserved logical sectors
+010     1      Number of FATS (1-3, almost always 2)
+               DOS before Windows 95 has a hard time with values other than 2
+011     2      Number of root directory entries
+               A value of 0 here indicates the root directory is a cluster.
+               On FAT16, cluster 1 refers to it, but DOS cna't do this.
+013     2      Total logical sectors. If 0 use offset 020
+015     1      Media descriptor (hard disks must use F8)
+016     2      Sectors per FAT
+-- Starting with DOS 3.0 --
+018     2      Sectors per track
+01A     2      Number of heads
+01C     4      Hidden Sectors: Number of sectors preceeding the boot sector
+-- Before DOS 3.31, the BPB ended at 01E, Hidden Sectors was  --
+020     4      Total logical sectors
+024     1      BIOS drive number
+025     1      Reserved, set to 0 by formatting tools
+026     1      Signature: 28 or 29 (hex)
+               28: last field is serial number
+               29: last field is file system type
+               all others: last field is Hidden Sectors
+027     4      Volume Serial Number
+02B     B(11)  Volume Label
+036     8      File System type, space padded
+               Should be FAT, FAT12, FAT16
+
+FAT32 EBPB (while called FAT32, could be used by a FAT12 or FAT16)
+Differences begin at 024
+
+024     4      Secters per FAT
+028     2      Drive Description/Flags
+               If bit 7 is set, bits 0-3 store active FAT
+02A     2      Version: the only version defined is 0
+02C     4      Cluster number of root directory, 0 would mean
+               use root directory entries, but MS only allows for
+               FAT16.
+030     2      Sector number of FS information sector
+               Not present if set to 0 or FFFF
+032     2      Sector number of backup boot sectors
+               Windows 9x uses 3 sectors to boot from FAT32.
+               Not present if set to 0 or FFFF
+034     12     Boot file name
+040     1      BIOS drive number
+041     1      Reserved, may contain F6 or 0
+042     1      Signature: 28 or 29 (hex)
+               28: last field is serial number
+               29: last field is file system type
+               all others: last field is Hidden Sectors
+043     4      Volume Serial Number
+047     B(11)  Volume Label
+052     8      File System type, must be "FAT32   "
+
+There is a very small structure at end of sector:
+1FD     1      BIOS drive number
+1FE     1      55
+1FF     1      AA
+
+If the sector size is greater than 512 bytes, the last two bytes
+are repeated at the actual end of the sector.
+
+FS Info Sector:
+
+000     4      Signature: 52 52 61 41 "RRaA"
+1E4     4      Signature: 72 72 41 61 "rrAa"
+1E8     4      Last known number of free data clusters
+1EC     4      Number of the most recently known to be allocated cluster
+1F0     4      Reserved
+1FC     4      Signature: 00 00 55 AA
+
+The FAT sectors store cluster numbers one after the other. The lowest
+cluster number is 2. For FAT12, a single entry can span a sector.
+In FAT32, there are really 28 bits of data per entry, with the top 4
+bits reserved for disk check tools and set to 0 by formatting tools
+and when the sector is allocated.
+
+FAT Entry 0 contains a copy of the Media Descriptor, with the rest
+of the bits set. FAT Entry 1 contains all bits set (FAT32: yes the
+top four bits are still clear.)
+
+Special values:
+0                     clear
+1                     temporary end of chain marker
+                      this is set while the file is trying to grow
+FF7/FFF7/?FFFFFF7     bad sector
+FF8+/FFF8+/?FFFFFF8+  end of chain
+
+The following characters are not legal:
+  - Control characters (0-31, 127)
+  - lowercase letters
+  - symbols: " * / : < > \ | + , . ; = [ ]
+Yes, space is legal. No, there's no way to type it on the command line.
+
+Directory entry:
+
+00      8       Short file name, the first character has special meaning:
+                - 0: end of directory
+                - 05: first character is E5
+                - 2E: special . or .. entry
+                - E5: file has been deleted
+08      3       Extension
+0B      1       Attributes
+                01 Read Only         10 Directory
+                02 Hidden            20 Archive
+                04 System            40 Device (not allowed on disk)
+                08 Volume Label      80 Reserved
+                The attribute combination 0F marks a VFAT entry
+0C      1       NT: Bit 4: extension is lowercase, Bit 3: name is lowercase
+                This allows WinNT to elide the VFAT entry in some cases.
+0D      1       DR-DOS puts the first character of deleted file here
+0E      2       Creation time if date filled
+10      2       Creation date if not 0
+12      2       Last access date if not 0, (not 16 bit DOS)
+14      2       If FAT32, high two bytes of starting cluster number
+16      2       Last modified time  Bits 15-11 hours
+                                         10-5  minutes
+                                          4-0  two-second interval
+                                               (value << 1 = 0..60)
+                Yes, 60 seconds is valid, but your OS probably doesn't
+                implement leap seconds correctly. Older DOS would display
+                it correctly but not generate it.
+18      2       Last modified date  Bits 15-9  year (1980 - 2107)
+                                          8-5  month (1-12)
+                                          4-0  day (1-31)
+1A      2       Low two bytes of starting cluster number
+1C      4       File size in bytes
+                Volume label and directory always store 0
+                VFAT entries never store 0
+
+VFAT entries look like this:
+00      1       Sequence number bits:
+                7   - 0
+                6   - last logical, first physical entry
+                5   - 0
+                4-0 - descending sequence number, stops at 1
+                value of E5 still means deleted
+01      A       Name characters (5 UTF-16 codepoints)
+0B      1       Attributes: always 0F
+0C      1       Type: always 0
+0D      1       Checksum of DOS name
+0E      C       Name characters (6 UTF-16 codepoints)
+1A      2       Always 0
+1C      4       Name characters (2 UTF-16 codepoints)
+
+VFN entries are always written last fragment first.  If there is free space
+in the final slot (topmost), a 00 00 character is written marking the end,
+followed by FF FF characters for any remaining characters. For this reason,
+the length field of a VFAT entry can never be 0.
+
+LFN checksum algorithm over the DOS name:
+   BYTE sum = 0
+   FOR i = 0 TO 10
+      sum = (sum ROLLRIGHT 1) + DOSNAME(i)
+
+Note that the implicit . is not included in the checksum.

@@ -1,0 +1,174 @@
+                          SSD FAT Filesystem Scan Tool
+
+SSDSCAN is a new filesystem scanner for scanning FAT filessytems on SSDs,
+NVMes, or SD cards, but *not* rotating head disks. The technology assumes
+that sector remapping is implemented, seek times are fast, and that the
+filesystem is aligned to physical sectors as much as possible.
+
+SSDSCAN operates through a DOS API, and is totally fine with VMs; note
+however that it's the condition of the underlying storage that is
+relevant. It will permit scanning floppy disk images, and this will work
+correctly unless the power goes out in the middle of the scan. Disk
+images other than floppy disks should be laid out correctly, see SSDFMT.
+
+SSDSCAN is not particular about the kind of DOS it is given, but can
+only scan FAT32 if given a DOS that knows about FAT32. Scanning a
+sufficiently large FAT32 drive also requires XMS memory.  While not as
+memory intensive as other scanners, SSDSCAN uses quite a bit of memory to
+scan large disks. For every 512 byte FAT32 sector, 32 bytes of RAM are
+required. In the pathological case, 1GB RAM may be required, and therefore
+if nothing else uses any XMS memory, 17 handles will suffice; however in
+the very reasonable case of a 2TB disk formatted with 4K clusters, only
+128 MB is requried, which in turn requires only 3 handles. However,
+RAMdrives and some other TSRs take up additional handles.
+
+When running on disk images mounted over the network, do not accept
+prompts to repair bad bad sector reads.
+
+Options:
+  /F  Passing /F fixes all errors without prompting. The only prompt that
+      can occur is F/D for "is marked as directory but seems to not be".
+  /C  Passing /C validates the chain length of all files and checks if
+      the files are linked to bad blocks. This check is optional as it
+      is quite slow and almost never necessary.
+  /Z  Recovers directories that have zerod sectors in the middle.
+      Running ddrescue on a newly damaged disk image results in the
+      recovery image containing zerod sectors wherever the original
+      bad sectors were (all-one bits would have been nice ...). Yes,
+      the documentation says it doesn't write zeros, but allocating new
+      disk space in secure operating systems provides it zeroed so that's
+      what is observed.
+      Under DOS, the 0 byte at the start of a directory entry marks the
+      end of the directory. (The Linux Kernel is *bugged* here.) If this
+      switch is passed, that meaning is ignored and if any files are found
+      after, the 0 byte entries are replaced by deleted empty files.
+      However, operating systems other than Linux may depend on this
+      and leave garbage in the directory data after the terminating 0 byte;
+      in that case, this would destroy data instead by interpreting garbage
+      entries as files.
+  /D  Describe filesystem. The filesystem layout numbers from the BPB
+      and some computed numbers are output at the start, and the number
+      of files and free clusters at the end.
+      Chunk is the number of sectors read at once. This is derived from the
+      presumed alignment of the filesystem. If a FAT32 filesystem is created
+      with FDISK, the presumed alignment will be pathological instead; however,
+      so is normal disk access.
+
+Memory Errors:
+* Insufficient Conventional Memory to check any disk:
+    SSDSCAN was loaded into a memory block smaller than 56KB. Since
+    DOS always loads COM files into the largest free memory block, you have
+    a severe memory shortage.
+* Insufficient Conventional Memory to check this disk:
+    SSDSCAN was loaded into a memory block big enough to initialize
+    but not big enough to allocate buffers for this particular filesystem.
+    The worst case requires 160KB.
+* Memory is too fragmented:
+    SSDSCAN was not able to satisfy its memory requirement after making
+    128 allocations. This is very unusual. The recommendation to reboot
+    is reasonable; this should not occur on a fresh boot.
+* Insufficient memory available to check this disk:
+    After exhausting the rest of its own memory block, all remaining
+    DOS memory, UMBs, and XMS memory, SSDSCAN was not able to allocate
+    enough memory for the usage bitmaps. Two bits per cluster are required.
+    SSDSCAN /D will report how many clusters the filesystem has before
+    this error appears.
+
+Unrepairable errors in filesystem:
+* Read error accessing boot sector
+* Bytes per sector isn't a power of 2
+* Unable to initialize logical sectored FAT because it isn't a multiple
+  of physicl sectors
+* Overflow computing filesystem offsets
+  - You have unreasonable values in the BPB.
+  - The maximum supported cluster size is 32KB.
+* Failed to find a valid boot sector
+  - Neither the boot sector nor any sector within range to be a potential
+    backup boot sector contained something that looks like a BPB.
+* Encountered a bad sector trying to read media descriptor
+  - The first sector of the first FAT must not be physically bad;
+    this can be recovered by cloning the disk skipping bad sectors
+    and trying again.
+* Media descriptor does not correspond to boot sector
+  - This is not a FAT filesystem.
+  - Quickformat has been interrupted.
+  - The first sector of all FATs has been destroyed.
+* Invalid Media Descriptor
+  - The filesystem is using a FAT12 media descriptor but is not FAT12.
+* Root cluster out of range
+  - The filesystem is set to use a root directory cluster (number of
+    root directory entries=0) but the cluster does not exist.
+* Correlated bad sectors destroyed FAT
+  - Bad sectors lined up to hit the same sector in all FATs.
+  - This error occurs if there is any bad sector in a FS with only one FAT.
+* Bad sector encountered writing to SSD
+  - On writing to the SSD, the write failed. Unless the disk isn't actually
+    local, it is a reasonable assumption the disk is late-stage failing
+    and should be replaced before writing any more to it, as it is out
+    of spare sectors.
+* New bad sector encountered reading SSD
+  - On reading from the SSD, the read failed, but SSDSCAN knows it read
+    this sector before.
+* Directory tree depth exceeds 51.
+  - There has to be a recursion limit. This one is 51.
+* Ran out of root directory entries.
+  - Move a file from the root directory to another directory or disk and
+    rerun SSDSCAN. The filesystem is good enough to let you move a file
+    without further damage it.
+* Ran out of space repairing disk.
+  - Move a file from the disk to another disk.
+* File exceeds 4GB by traversal.
+  - You have a file with more than 4GB of clusters allocated to it.
+  - There's a rumor that such an OS exists that actually does this,
+    and writes the number of bytes in the last cluster to the directory
+    entry when it does so. I've not seen it either, but neither have I
+    seen this particular problem for real.
+
+Repairable errors in filesystems:
+* Boot sector damaged but backup boot sector found
+  - This is currently bugged in FreeDOS and the condition cannot occur.
+* FATs disagree, repair with best guess
+  - A hueristic is applied to select the best guess.
+  - An all zeros sector is never the best guess.
+  - An all ones sector is only the best guess if the other is all zeros.
+* Anomalous record in FAT
+  - One of the first two entries is wrong
+* Mid-allocation cluster value
+  - The next cluster is one.
+* Out of range cluster value
+  - The next cluster is too large, but not end of chain.
+* Free block in use
+  - Repairing it sets it to end of chain.
+* Cross-linked cluster
+  - Repairing it truncates the file that has the previous cluster later
+    in the disk.
+* <<file>> has invalid filename character
+* <<file>> has a reserved name
+* <<file>> is an anomalous directory entry
+  - The initial cluster is out of range; repairing deletes it.
+* <<file>> refers to a free cluster
+  - Repairing deletes it
+* <<file>> refers to a crosslinked cluster
+  - Repairing deletes it
+* <<file>> is marked as a directory but seems to not be
+  - The directory attribute bit got toggled on a file.
+  - The first sector of the directory got destroyed.
+  - SSDSCAN is asking you what it is.
+* <<file>> is marked as a directory but is an empty file.
+* <<dir>> has a broken .. entry
+* Bad sector encountered reading directory
+  - Replaces the bad sector; you probably lost files
+* Bad sector marker encountered reading directory
+  - Replaces the bad sector and truncates the directory.
+  - You probably lost some files.
+* <<file>> has an impossible length
+  - The length is set to the chain length.
+* Found lost directory
+  - The directory is placed in LOST.FND.
+* Found lost file
+  - The file is placed in LOST.FND.
+
+Orphaned VFAT entries are removed automatically without prompting.
+
+All one bits directory entries are changed to deleted entries without
+prompting. This should only occur after bad sector recovery.
