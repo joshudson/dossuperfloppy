@@ -4364,9 +4364,9 @@ incrementprogress:	; DI=pointer to total, destroys nothing
 .r	pop	dx
 	pop	ax
 	ret
-.u	cmp	[pgdisplay], byte 99	; Prevent infinite loop on division by 0 (empty fs)
+.u	cmp	[pgdisplay], byte 100	; Prevent infinite loop on division by 0 (empty fs)
 	je	.n
-.c	cmp	[pgdisplay], byte 99
+.c	cmp	[pgdisplay], byte 100
 	je	.d
 	inc	byte [pgdisplay]
 	sub	ax, [di]
@@ -4377,7 +4377,10 @@ incrementprogress:	; DI=pointer to total, destroys nothing
 	cmp	ax, [di]
 	jae	.c
 .d	mov	al, [pgdisplay]
-	aam
+	cmp	al, 100
+	jb	.k
+	mov	al, 99
+.k	aam
 	xchg	al, ah
 	xchg	ax, dx
 	push	bp

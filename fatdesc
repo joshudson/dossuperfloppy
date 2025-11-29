@@ -66,6 +66,9 @@ Important partition types
 83   Any native Linux filesystem
 B0   FAT repair utility created by SSDFMT (CHS)
 B5   FAT repair utility created by SSDFMT (LBA)
+DA   Non-FS data
+EE   GPT Protective MBR
+EF   EFI System Partition
 
 FAT file system:
 Variables N: number of reserved sectors
@@ -187,11 +190,17 @@ Special values:
 FF7/FFF7/?FFFFFF7     bad sector
 FF8+/FFF8+/?FFFFFF8+  end of chain
 
-The following characters are not legal:
+The actual determination of the FAT type is done with number of clusters.
+1-FF5         FAT12
+FF6-FFF5      FAT16
+FFF6-FFFFFF5  FAT32
+
+The following characters are not legal in file names:
   - Control characters (0-31, 127)
   - lowercase letters
   - symbols: " * / : < > \ | + , . ; = [ ]
 Yes, space is legal. No, there's no way to type it on the command line.
+Symbols and lowercase letters are legal in volume labels.
 
 Directory entry:
 
