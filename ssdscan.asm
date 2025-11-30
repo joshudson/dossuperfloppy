@@ -2260,8 +2260,11 @@ descendtree:
 	mov	cx, [bp - 8]
 	mov	[bp - 6], cx
 	call	sectorfromcluster
+	mov	cx, dx			; CX=sector high
+	xchg	ax, bx			; BX=sector low, AX=chunk
+	mul	word [sectsperchunk]	; DX:AX=sector from chunk (DX should always be 0)
 	add	ax, bx
-	adc	dx, word 0
+	adc	dx, cx			; DX:AX=sector
 .readdirchunk:
 	test	[bp - 9], byte 1	; If we're rewinding we have to check if
 	jnz	.readdirchunkcachemiss	; it's the same chunk or not, but if the
@@ -3103,6 +3106,7 @@ descendtree:
 	ret
 
 .queryfixentry:
+	;call	newline		; Uncomment during debugging
 	push	dx
 	mov	dx, out_crfile
 	mov	ah, 9
