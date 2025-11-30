@@ -1,4 +1,4 @@
-; Copyright Joshua Hudson 2022-24
+; Copyright Joshua Hudson 2022-25
 
 ; Next up: FAT32 part of rebuild
 
@@ -15,14 +15,32 @@ _start:
 	call	.pic
 .pic	pop	ax
 	sub	ax, .pic
-	pop	bx
+	pop	di
 	mov	cl, 4
 	shr	ax, cl	; We *will* be at the start of a paragraph
-	add	bx, ax
-	mov	ds, bx
-	mov	es, bx
-	add	bx, 1000h
-	mov	[blockseg], bx
+	add	di, ax
+	call	detectdos
+	jnz	.dos
+.dos	sub	di, 11h
+	mov	ds, di
+	mov	cx, [3]	; Get actual length from MCB
+	sub	cx, 11h
+	add	di, 11h
+	jmp	.known
+.bios	int	12h
+	xchg	ax, cx
+	sub	cx, di
+.known	mov	ds, di
+	mov	es, di
+	cmp	cx, 1840h
+	jae	.enuf
+	mov	si, s_nomem
+	mov	bx, 7
+	mov	cx, 14
+	call	out_string
+	jmp	exit
+.enuf	add	di, 1000h
+	mov	[blockseg], di
 	cld
 	mov	[saveddl], dl
 	mov	[rebootmsg], byte 0
@@ -2387,13 +2405,7 @@ exit:
 	cmp	dh, 25
 	jb	.erase
 %endif
-	xor	dx, dx
-	mov	es, dx
-	mov	ax, [es:86h]
-	mov	bx, [es:84h]
-	or	ax, ax
-	jnz	.dos
-	or	bx, bx
+	call	detectdos
 	jnz	.dos
 .bios	xor	ax, ax
 	mov	dl, [saveddl]
@@ -2409,7 +2421,7 @@ exit:
 	mov	ax, 0201h
 	int	13h
 	jc	.again
-.entry	jmp	07C0h:0h
+.entry	jmp	0:7C00h
 .again	mov	ax, 0201h
 	int	13h
 	jnc	.entry
@@ -2425,6 +2437,14 @@ exit:
 	int	21h
 .nmsg	mov	ax, 4C00h
 	int	21h
+
+detectdos:	; Not sure why this primitive test sufficies, but it does
+	xor	ax, ax
+	mov	es, ax
+	mov	ax, [es:86h]
+	mov	bx, [es:84h]
+	or	ax, bx
+	ret
 
 align	4, db 0
 
@@ -2516,7 +2536,7 @@ procmbr:
 .chs	mov	ah, 02h
 	int	13h
 .chki	jc	.error
-	jmp	7C0h:0
+	jmp	bx
 .error	mov	si, 0798h
 	mov	cx, 14
 .msg	mov	bx, 7
@@ -3247,6 +3267,7 @@ bootcheck_end:
 
 s_name	db	0B5h, ' SSD Format ', 0C6h
 s_vsn	db	'1.8a'		; should start with v but this is unreleased checkpoint
+s_nomem	db	'Not enough RAM'
 s_disk	db	'format disk '
 s_mb	db	' MB'
 s_small	db	'Disk is too small'
