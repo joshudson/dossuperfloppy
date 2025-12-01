@@ -99,7 +99,8 @@ Address Length Meaning
                reserve extra data bytes, and others write EB FE 90.
 003     8      Was supposed to be tool that formatted it; however
                due to checking for known good tools rather than known
-               broken ones, ancient DOS rejects other than IBM  2.0
+               broken ones, for every entry other than "IBM  2.0" there
+               exists at least one version of DOS that rejects it.
 00B     2      Bytes per logical sector
 00D     1      Sectors per cluster, allowed vaues are 1,2,4,8,16,32,64,128.
                Some versions of DOS do not permit > 4KB clusters.
