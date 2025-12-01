@@ -2318,18 +2318,13 @@ descendtree:
 	mov	ax, [es:si + 4]
 	mov	dx, [es:si + 6]
 	mov	bx, [es:si + 8]
-	cmp	bx, [bp - 32]
+	cmp	bx, [bp - 32]		; No, there are not 16K entries in a cluster
 	jne	.notresetstate
 	cmp	ax, [bp - 30]
 	jne	.notresetstate
 	cmp	dx, [bp - 28]
 	jne	.notresetstate
-	mov	cx, 0FFFFh	; Hit roll-forward marker to set state back to 0
-	mov	[bp - 16], cx
-	mov	[bp - 14], cx
-	mov	[bp - 12], cx
-	inc	cx		; set CX to 0
-	mov	[bp - 26], cx
+	call	.doresetstate
 .notresetstate:
 	test	si, si
 	jnz	.skipentrynotroot
@@ -2389,6 +2384,16 @@ descendtree:
 	mov	[es:si + 4], ax
 	mov	[es:si + 6], dx
 	and	[es:si + 8], word 8000h	;Reset entry within cluster, keep flag
+	;There are two possible encodings for transition at start of cluster:
+	;at the end of the last cluster and the start of the next.
+	test	[bp - 32], word 7FFFh
+	jnz	.notresetstate2
+	cmp	ax, [bp - 30]
+	jne	.notresetstate2
+	cmp	dx, [bp - 28]
+	jne	.notresetstate2
+	call	.doresetstate
+.notresetstate2:
 	jmp	.readdirentryproc
 .enddirectory:
 	call	.dirwritebackifdirty
@@ -2401,6 +2406,7 @@ descendtree:
 	mov	sp, bp
 	ret
 
+; descendtree's state machines start here
 .scanlfnsubsequent:
 	mov	al, [es:bx]
 	cmp	al, 0			; Check for deleted/empty record
@@ -2953,9 +2959,10 @@ descendtree:
 .scannotzero:
 	cmp	[es:bx], byte 0
 	je	.scanskipreturn_vnotzero
-	mov	bx, [bp - 32]
-	mov	ax, [bp - 30]
-	mov	dx, [bp - 28]
+	mov	es, [buf4seg]
+	mov	bx, [bp - 12]
+	mov	dx, [bp - 14]
+	mov	ax, [bp - 16]
 	xchg	ax, [es:si + 4]			; Set exit point
 	xchg	dx, [es:si + 6]
 	xchg	bx, [es:si + 8]
@@ -2963,7 +2970,7 @@ descendtree:
 	mov	[bp - 30], ax
 	mov	[bp - 28], dx
 	mov	[bp - 26], byte 4
-	jmp	.scanskipreturn_vnotzero
+	jmp	.readdirentryproc
 
 	; Rebuild trashed . entries from bad sector recovery
 .dotentries_allbits:
@@ -3086,6 +3093,16 @@ descendtree:
 	mov	[bp - 26], byte 2
 	mov	es, [buf4seg]
 	jmp	.readdirentryproc
+
+; Inner functions of descendtree
+.doresetstate:
+	mov	cx, 0FFFFh	; Hit roll-forward marker to set state back to 0
+	mov	[bp - 16], cx
+	mov	[bp - 14], cx
+	mov	[bp - 12], cx
+	inc	cx		; set CX to 0
+	mov	[bp - 26], cx
+	ret
 
 .dirwritebackifdirty:
 	test	[bp - 9], byte 2
