@@ -1,15 +1,15 @@
                           SSD FAT Filesystem Scan Tool
 
-SSDSCAN is a new filesystem scanner for scanning FAT filessytems on SSDs,
+SSDSCAN is a new filesystem scanner for scanning FAT filesystems on SSDs,
 NVMes, or SD cards, but *not* rotating head disks. The technology assumes
 that sector remapping is implemented, seek times are fast, and that the
 filesystem is aligned to physical sectors as much as possible.
 
 SSDSCAN operates through a DOS API, and is totally fine with VMs; note
-however that it's the condition of the underlying storage that is
-relevant. It will permit scanning floppy disk images, and this will work
-correctly unless the power goes out in the middle of the scan. Disk
-images other than floppy disks should be laid out correctly, see SSDFMT.
+however that it's the type of underlying storage that is relevant. It will
+permit scanning floppy disk images, and this will work correctly unless the
+power goes out in the middle of the scan. Disk images other than floppy
+disks should be laid out correctly, see SSDFMT.
 
 SSDSCAN is not particular about the kind of DOS it is given, but can
 only scan FAT32 if given a DOS that knows about FAT32. Scanning a
@@ -20,10 +20,10 @@ required. In the pathological case, 1GB RAM may be required, and therefore
 if nothing else uses any XMS memory, 17 handles will suffice; however in
 the very reasonable case of a 2TB disk formatted with 4K clusters, only
 128 MB is requried, which in turn requires only 3 handles. However,
-RAMdrives and some other TSRs take up additional handles.
+RAMdrives, some other TSRs, and FreeCOM take up additional handles.
 
 When running on disk images mounted over the network, do not accept
-prompts to repair bad bad sector reads.
+prompts to repair bad sector reads.
 
 Options:
   /F  Passing /F fixes all errors without prompting. The only prompt that
@@ -31,7 +31,10 @@ Options:
   /C  Passing /C validates the chain length of all files and checks if
       the files are linked to bad blocks. This check is optional as it
       is quite slow and almost never necessary.
-  /Z  Recovers directories that have zerod sectors in the middle.
+  /B  Performs a read-only test on clusters currently marked bad.
+      This should be done aftery copying the image to a new SSD, as
+      bad sectors are not bad after a copy.
+  /Z  Recovers directories that have zeroed sectors in the middle.
       Running ddrescue on a newly damaged disk image results in the
       recovery image containing zerod sectors wherever the original
       bad sectors were (all-one bits would have been nice ...). Yes,

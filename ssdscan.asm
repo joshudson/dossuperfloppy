@@ -118,8 +118,10 @@ _start:
 	je	.o2
 	cmp	al, 'D'
 	je	.o3
-	cmp	al, 'Z'
+	cmp	al, 'B'
 	je	.o4
+	cmp	al, 'Z'
+	je	.o5
 	jmp	.b
 .o1	or	bl, opflag_f
 	jmp	.b
@@ -127,7 +129,9 @@ _start:
 	jmp	.b
 .o3	or	bl, opflag_d
 	jmp	.b
-.o4	or	bl, opflag_z
+.o4	or	bl, opflag_b
+	jmp	.b
+.o5	or	bl, opflag_z
 	jmp	.b
 .arg	mov	dx, msg_usage
 	mov	ah, 9
@@ -1485,6 +1489,41 @@ stage_fat:
 	sbb	[freeclust + 2], word 0
 	call	[isbadblock]
 	jne	.notbadblock
+	test	[opflags], byte opflag_b
+	jz	.isbadblock
+	mov	ax, [bp - 6]
+	mov	dx, [bp - 4]
+	add	ax, di
+	adc	dx, 0
+	call	sectorfromcluster
+	push	es
+	mov	es, [buf4seg]
+	mov	cx, [sectsperclust]
+.isbadblockloop:
+	push	cx
+	push	di
+	call	diskread0
+	pop	di
+	pop	cx
+	jc	.isbadblockpop
+	add	ax, [sectsperchunk]
+	adc	dx, 0
+	sub	cx, [sectsperchunk]
+	ja	.isbadblockloop
+	call	invalidatesector	; It's good now
+	pop	es
+	mov	ax, [bp - 6]
+	mov	dx, [bp - 4]
+	call	getbitsclustdi
+	test	ch, byte 1
+	jnz	.setendchain
+	xor	ax, ax
+	xor	dx, dx
+	call	entrytoblockall
+	jmp	.clustdone
+.isbadblockpop:
+	pop	es			; Still bad
+.isbadblock:
 	mov	ax, [bp - 6]
 	mov	dx, [bp - 4]
 	mov	ch, 3		; It's bad; therefore it's accounted for all by itself
@@ -1978,7 +2017,29 @@ getnextcluster:
 	ret
 .worker xor	cx, cx
 	push	di
-.loop	push	cx
+.loop	mov	si, es
+	cmp	si, [buf1seg]
+	jne	.n1
+	cmp	ax, [buf1sector]
+	jne	.miss
+	cmp	dx, [buf1sector + 2]
+	jne	.miss
+	jmp	.found
+.n1	cmp	si, [buf2seg]
+	jne	.n2
+	cmp	ax, [buf2sector]
+	jne	.miss
+	cmp	dx, [buf2sector + 2]
+	jne	.miss
+	jmp	.found
+	;buf3seg can't happen
+.n2	cmp	si, [buf4seg]
+	jne	.miss
+	cmp	ax, [buf4sector]
+	jne	.miss
+	cmp	dx, [buf4sector + 2]
+	je	.found
+.miss	push	cx
 	push	ax
 	push	dx
 	call	diskread0
@@ -5221,11 +5282,12 @@ setbufsector:
 	mov	[buf2sector], ax
 	mov	[buf2sector + 2], dx
 	jmp	.n4
-.n2	cmp	bx, [buf3seg]
-	jne	.n3
-	mov	[buf3sector], ax
-	mov	[buf3sector + 2], dx
-	jmp	.n4
+.n2:
+;	cmp	bx, [buf3seg]		; buf3seg is only used in FAT pass, so
+;	jne	.n3			; there's no case where a cache hit can happen
+;	mov	[buf3sector], ax
+;	mov	[buf3sector + 2], dx
+;	jmp	.n4
 .n3	cmp	bx, [buf4seg]
 	jne	.n4
 	mov	[buf4sector], ax
@@ -5402,9 +5464,10 @@ reservednames	db	"AUX     "
 lostfnd		db	"LOST    FND"
 
 msg_usage	db	'SSDSCAN pre-alpha, for 16 bit FAT only', 13, 10
-		db	'Usage: SSDSCAN DRIVE: [/F] [/C] [/D]', 13, 10
+		db	'Usage: SSDSCAN DRIVE: [/F] [/C] [/D] [/B] [/Z]', 13, 10
 		db	'/F   Fix errors without prompting', 13, 10
 		db	'/C   Check chain length against file length', 13, 10
+		db	'/B   Retest clusters currently marked bad', 13, 10
 		db	'/Z   Recovery directories that have zeroed sectors in the middle', 13, 10
 		db	'     (caution: 0 is normally the directory terminator; can damage FS instead)', 13, 10
 		db	'/D   Describe filesystem'
@@ -5596,7 +5659,8 @@ b_mem_xms	equ	5
 opflag_f	equ 1
 opflag_c	equ 2
 opflag_d	equ 4
-opflag_z	equ 8
+opflag_b	equ 8
+opflag_z	equ 16
 opflag2_bigdisk	equ 1
 opflag2_7305	equ 2
 opflag2_ebpb	equ 4
