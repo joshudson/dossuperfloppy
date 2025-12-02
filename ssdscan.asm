@@ -5463,7 +5463,8 @@ reservednames	db	"AUX     "
 		db	0
 lostfnd		db	"LOST    FND"
 
-msg_usage	db	'SSDSCAN pre-alpha, for 16 bit FAT only', 13, 10
+msg_usage	db	'SSDSCAN alpha1, for 16 bit FAT only', 13, 10
+		db	'Copyright (C) Joshua Hudson 2024-2025', 13, 10
 		db	'Usage: SSDSCAN DRIVE: [/F] [/C] [/D] [/B] [/Z]', 13, 10
 		db	'/F   Fix errors without prompting', 13, 10
 		db	'/C   Check chain length against file length', 13, 10
