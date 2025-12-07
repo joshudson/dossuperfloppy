@@ -56,6 +56,9 @@ ERRORLVL.COM: errorlvl.asm
 BIOSRAM.COM: biosram.asm
 	nasm -f bin -o BIOSRAM.COM biosram.asm
 
+REMAP25.COM: remap25.asm
+	nasm -f bin -o REMAP25.COM remap25.asm
+
 DUMMYCHK.COM: dummycheck.asm
 	nasm -f bin -o DUMMYCHK.COM dummycheck.asm
 

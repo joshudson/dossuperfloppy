@@ -129,7 +129,6 @@ Unrepairable errors in filesystem:
 
 Repairable errors in filesystems:
 * Boot sector damaged but backup boot sector found
-  - This is currently bugged in FreeDOS and the condition cannot occur.
 * FATs disagree, repair with best guess
   - A hueristic is applied to select the best guess.
   - An all zeros sector is never the best guess.
@@ -175,3 +174,14 @@ Orphaned VFAT entries are removed automatically without prompting.
 
 All one bits directory entries are changed to deleted entries without
 prompting. This should only occur after bad sector recovery.
+
+Recover backup boot sector is currently bugged in FreeDOS. The included
+REMAP25.COM can be used to recover it anyway.  The arguments to REMAP25 are
+hard disk number (starts with 1), partition number, and program to run:
+    REMAP25 1 1 Z: A:\SSDSCAN.COM Z: (options)
+Running REMAP25 with just a disk number lists partitions on the disk.
+BONUS: can scan host system filesystem (up to 2TB) if given the device
+node as a disk. Assuming the file system image device is the second hard
+disk, it may be scanned as follows:
+    REMAP25 2 0 Z: C:\SSD\SSDSCAN.COM Z: (options)
+(or wherever SSDSCAN.COM ended up)
