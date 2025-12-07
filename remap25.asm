@@ -311,9 +311,6 @@ loadlist:
 	push	dx
 	mov	bx, di
 	push	di
-	add	di, 32768 + 130
-	cmp	di, sp
-	jae	.stack
 	call	.diskaccess
 	jc	.err
 	pop	bx
@@ -361,13 +358,16 @@ loadlist:
 	pop	ax
 	add	di, 12
 	ret
+
 .stack	mov	dx, stack
 	mov	ah, 9
 	int	21h
 	mov	ax, 4CFFh
 	int	21h
-
 .diskaccess:
+	lea	di, [bx + 32768 + 128]
+	cmp	di, sp
+	jae	.stack
 	mov	[ahaction], byte 2h
 	cmp	[type], byte 'L'
 	je	.lbaaccess

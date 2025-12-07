@@ -271,8 +271,8 @@ stage_media_descriptor:
 	jnb	.bpb			; DR-DOS has some custom media descriptors with different BPB formats
 .notbpb	mov	ax, dx			; below F0h; but we can't handle these.
 	inc	ax
-	cmp	ax, 97			; Worst case for FAT32 backup boot sector
-	jl	.mloop
+	cmp	ax, 129			; Worst case for FAT32 backup boot sector
+	jl	.mloop			; (32K bytes per logical sector, 512 bytes physical)
 	mov	dx, msg_noboot
 	jmp	stage_media_descriptor.errorx
 .bpb	push	dx			; Save boot sector address for .gmdesc

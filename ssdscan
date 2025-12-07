@@ -129,6 +129,8 @@ Unrepairable errors in filesystem:
 
 Repairable errors in filesystems:
 * Boot sector damaged but backup boot sector found
+  - Restarting DOS is required after repairing this damage before trying
+    to access the drive. The DOS internal tables remember the bad values.
 * FATs disagree, repair with best guess
   - A hueristic is applied to select the best guess.
   - An all zeros sector is never the best guess.
