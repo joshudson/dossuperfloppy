@@ -1174,7 +1174,7 @@ initpools:
 .bmdsc2	jmp	stage_media_descriptor.errorx
 .nbvec	jmp	newbadsectors
 .gmdesc	pop	ax			; Got boot sector address back
-	cmp	ax, 0
+	test	ax, ax
 	jnz	.bootbk
 	jmp	.mddone
 .bootbk	push	ax
@@ -1186,18 +1186,16 @@ initpools:
 	jne	.mddone
 	xchg	ax, dx
 	xor	dx, dx
-	mov	es, [buf1seg]
+	push	word [sectsperchunk]
+	mov	[sectsperchunk], word 1
+	mov	es, [buf4seg]
 	call	diskread0
 	jc	.nbvec
 	xor	ax, ax
 	xor	dx, dx
 	mov	ch, 0
 	call	diskwrite0
-	xor	dx, dx			; Repair boot sector clobbered buf1; reload
-	mov	ax, [reservedsects]
-	call	diskread0
-	jnc	.mddone
-	or	bp, 1
+	pop	word [sectsperchunk]
 .mddone	call	checkmark
 
 stage_fat:
@@ -1447,7 +1445,6 @@ stage_fat:
 	inc	di
 .notfirst:
 	;*NOW* we can scan the FAT and update bitmaps
-
 	call	[entryfromblock]
 	or	dx, dx
 	jnz	.notfixendchain
@@ -1485,8 +1482,6 @@ stage_fat:
 	je	.setendchain	; Scan pass is tolerant of this, but the FS is still broken
 	jmp	.clustdone	; We won't allocate this cluster because of how cluster alloc works
 .notfree:
-	sub	[freeclust], word 1
-	sbb	[freeclust + 2], word 0
 	call	[isbadblock]
 	jne	.notbadblock
 	test	[opflags], byte opflag_b
@@ -1528,7 +1523,7 @@ stage_fat:
 	mov	dx, [bp - 4]
 	mov	ch, 3		; It's bad; therefore it's accounted for all by itself
 	call	setbitsclustdi
-	jmp	.clustdone
+	jmp	.clustdonenotfree
 .notbadblock:
 	call	[isendchain]
 	jae	.endchain
@@ -1584,8 +1579,6 @@ stage_fat:
 	pop	dx
 	pop	ax
 	jne	.notoverlarge
-	sub	[freeclust], word 1
-	sbb	[freeclust + 2], word 0
 	push	dx
 	push	ax
 	mov	ch, 2
@@ -1679,6 +1672,8 @@ stage_fat:
 
 	;Advance loop
 .advanceblockloop:
+	mov	ah, 0Bh		; Checks for ^C as INT 25h doesn't
+	int	21h
 	mov	ax, [bp - 6]
 	mov	dx, [bp - 4]
 	add	ax, [bp - 18]
@@ -2356,6 +2351,8 @@ descendtree:
 	mov	al, error_nofix
 	jmp	exit
 .postreaddirbadsector:			; means after the bad sector check on readdir
+	mov	ah, 0Bh			; Checks for ^C as INT 25h doesn't
+	int	21h
 
 	mov	bx, [bp - 26]
 	mov	ax, [descendtreetable + bx]
@@ -5500,7 +5497,10 @@ dsc_usedclust	db	13, 10, 'Number of used clusters    : '
 dsc_freeclust	db	13, 10, 'Number of free clusters    : '
 dsc_end:
 msg_error0	db	'Read error accessing boot sector.', 13, 10
-		db	'This might be recoverable using SSDFIXBT after copying to a new SSD.', 13, 10, '$'
+%ifndef NO_SSDFIXBT
+		db	'This might be recoverable using SSDFIXBT after copying to a new SSD.', 13, 10
+%endif
+		db	'$'
 msg_notpow2	db	"Bytes per sector isn't a power of 2", 13, 10, '$'
 msg_logfail	db	"Unable to initialize logical sectored FAT", 13, 10, "because it isn't aligned to physical sectors.", 13, 10, '$'
 msg_overflow	db	'Overflow computing filesystem offsets', 13, 10, '$'
