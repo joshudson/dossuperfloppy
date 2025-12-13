@@ -49,6 +49,7 @@ Options:
       and leave garbage in the directory data after the terminating 0 byte;
       in that case, this would destroy data instead by interpreting garbage
       entries as files.
+  /X  Preserves the ability to run /Z in the future.
   /D  Describe filesystem. The filesystem layout numbers from the BPB
       and some computed numbers are output at the start, and the number
       of files and free clusters at the end.
@@ -85,6 +86,10 @@ Unrepairable errors in filesystem:
 * Overflow computing filesystem offsets
   - You have unreasonable values in the BPB.
   - The maximum supported cluster size is 32KB.
+* Too many clusters
+  - The number of clusters in this filesystem doesn't fit in a FAT32 entry.
+* Too many clusters for FAT
+  - The number of clusters is too large for the number of FAT sectors.
 * Failed to find a valid boot sector
   - Neither the boot sector nor any sector within range to be a potential
     backup boot sector contained something that looks like a BPB.
@@ -173,6 +178,8 @@ Repairable errors in filesystems:
   - The file is placed in LOST.FND.
 
 Orphaned VFAT entries are removed automatically without prompting.
+
+Garbage past the end of directory marker is removed without prompting.
 
 All one bits directory entries are changed to deleted entries without
 prompting. This should only occur after bad sector recovery.
