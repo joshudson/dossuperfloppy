@@ -69,3 +69,7 @@ clean:
 	rm -f LICENSE.TXT FORMATHD.TXT PATCHDOS.COM FORMATHD.COM ISSF.COM FORMATHD.ZIP \
 		SSDFMT.TXT SSDFMT.COM SSDFIXBT.COM POSTNTFS.EXE SSDFMT.ZIP \
 		hdgeometry CMP.COM NEWIMAGE.COM ERRORLVL.COM
+
+host/sparcify32: host/sparcify32.asm host/syscalls32.inc
+	nasm -f bin -o host/sparcify32 -I host host/sparcify32.asm
+	chmod +x host/sparcify32

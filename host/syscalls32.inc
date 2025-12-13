@@ -1,0 +1,20 @@
+%define __NR_exit 1
+%define __NR_fork 2
+%define __NR_read 3
+%define __NR_write 4
+%define __NR_open 5
+%define __NR_close 6
+%define __NR_waitpid 7
+%define __NR_unlink 10
+%define __NR_execve 11
+%define __NR_chdir 12
+%define __NR_signal 48
+%define __NR_ioctl 54
+%define __NR_dup2 63
+%define __NR_llseek 140
+%define __NR_fdatasync 148
+%define __NR_ftruncate64 194
+
+%define BLKFLSBUF 1261h
+%define TCGETS 5401h
+%define TCSETS 5402h
