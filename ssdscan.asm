@@ -2481,7 +2481,7 @@ descendtree:
 	jne	.advanceisnotbad
 	; This cluster is bad, but we already hit the bottom of it!
 	; However, it could be write-bad only. Tail-migrate it is.
-	mov	cx, state_fat
+	mov	cx, state_dir
 	mov	dx, query_fixtail
 	call	queryfixyn
 	cmp	al, 'y'
@@ -2489,6 +2489,7 @@ descendtree:
 	mov	dx, [bp - 40]
 	jne	.enddirectoryclean
 	mov	[bp - 26], byte 255
+	mov	di, [bp - 8]
 	jmp	.readdirbadsector_recover
 .advanceisnotbad:
 	mov	es, [buf4seg]
@@ -2987,9 +2988,10 @@ descendtree:
 	jmp	.skipentry
 
 .scanfixparent:
-	test	[es:bx + 0Bh], byte 08h
+	mov	al, [es:bx + 0Bh]
+	test	al, byte 08h
 	jnz	.scanskipreturn
-	test	[es:bx + 0Bh], byte 10h
+	test	al, byte 10h
 	jz	.scanskipreturn
 	mov	ax, [es:bx + 1Ah]
 	xor	dx, dx
@@ -3000,6 +3002,7 @@ descendtree:
 	push	ax
 	push	dx
 	call	.dirwritebackifdirty
+	or	[bp - 9], byte 1
 	pop	dx
 	pop	ax
 	call	sectorfromcluster
@@ -3008,8 +3011,7 @@ descendtree:
 	call	diskread0
 	pop	di
 	pop	si
-	or	[bp - 9], byte 1
-	jc	.scanskipreturn		; Not dealing with this nonsense
+	jc	.scanskipreturn_vnotzero	; Not dealing with this nonsense
 	mov	es, [buf4seg]
 	call	.dirwritebackgetch
 	push	cx
@@ -3071,7 +3073,6 @@ descendtree:
 	jmp	.dotentries_match2
 
 .scanvalidatedotentries:
-	; Seems to be going wrong around here; we read cluster 3 but it doesn't contain the expected
 	; There's four things that can happen
 	; 1) Sector could be all 0 or all 1 bits, in which case we restore the . and .. entries
 	; 2) Sector could have . and .. entries in which case we might or might not have to repair
@@ -3403,7 +3404,7 @@ descendtree:
 	mov	cx, .recbadsectorfill
 	cmp	ax, [es:si]
 	jne	.recbadsector_notfirstchildclust
-	cmp	dx, [es:si + 4]
+	cmp	dx, [es:si + 2]
 	jne	.recbadsector_notfirstchildclust
 	test	ax, ax
 	jnz	.recbadsector_firstchildclust
@@ -3472,28 +3473,31 @@ descendtree:
 	mov	es, [buf2seg]
 	call	recoverbadsector
 	mov	es, [buf4seg]
-	call	newline
 	pop	di
 	pop	si
-	mov	bx, [es:si]
-	mov	cx, [es:si + 2]
-	cmp	bx, [es:si + 4]
-	jne	.recbadnotfirst
-	cmp	cx, [es:si + 6]
-	jne	.recbadnotfirst
-	mov	[bp - 30], cx
-	mov	[bp - 28], bx
+	mov	bx, ax
+	mov	cx, dx
+	xchg	bx, [es:si + 4]	; We just replaced it
+	xchg	cx, [es:si + 6]
+	cmp	bx, [es:si]
+	jne	.recbadsectornotfirst
+	cmp	cx, [es:si + 2]
+	jne	.recbadsectornotfirst
+	mov	[es:si], ax
+	mov	[es:si + 2], dx
+	mov	[bp - 30], ax
+	mov	[bp - 28], dx
 	mov	[bp - 26], byte 6
 	or	di, 8000h
 	mov	[bp - 32], di
-	mov	[es:si + 8], word 8000h	; Rewind and adjust pointers
-	jmp	.readdirentryproc
-.recbadnotfirst:
+	mov	[es:si + 8], word 8002h	; Rewind and adjust pointers
+	jmp	.readdirentryproc	; yes, this overwrite the enddirectory state
+.recbadsectornotfirst:
 	mov	bx, ax
 	mov	cx, dx
 	mov	[es:si], ax
 	mov	[es:si + 2], dx
-	cmp	[bp - 26], byte 255
+	cmp	[bp - 26], byte 255	; if set, we're already off the end and can't go to readdirentryproc
 	je	.recbadenddir
 	jmp	.readdirentryproc
 .recbadenddir:
@@ -3504,30 +3508,23 @@ descendtree:
 	jc	.recbadsectorfillfirstbad
 	test	si, si
 	jnz	.recbadsectorfill_done
-	mov	ax, [bp - 10]
-	mov	cx, [bp - 12]
+	mov	ax, [bp - 10]		; Get new . pointer
+	mov	cx, [bp - 12]		; This code is dirty
 	mov	[es:14h], ax
 	mov	[es:1Ah], cx
+	call	.recbadsectorfill_getdotdot
+	mov	[es:34h], bx
+	mov	[es:3Ah], cx
 .recbadsectorfill_done:
 	ret
 .recbadsectorfillfirstbad:
 	test	si, si
 	jnz	.recbadsectorfill	; Not first
-	; Construct . and .. entries
-	; This code is dirty
-	mov	bx, [bp - 10]
-	mov	cx, [bp - 12]
+	mov	bx, [bp - 10]		; Construct new . and .. entries
+	mov	cx, [bp - 12]		; This code is dirty
 	mov	ax, '. '
 	call	generatedotdirectoryentry
-	; And this is even dirtier
-	push	si
-	push	es
-	mov	si, [bp + 16]
-	mov	es, [buf4seg]
-	mov	bx, [si - 8]		; previous entry's starting cluster
-	mov	cx, [si - 10]
-	pop	es
-	pop	si
+	call	.recbadsectorfill_getdotdot
 	mov	ax, '..'
 	call	generatedotdirectoryentry
 	stc				; From here it's the normal filler
@@ -3549,6 +3546,22 @@ descendtree:
 	stosw
 	cmp	di, [bytespersector]
 	jb	.recbadsectorfill
+	ret
+.recbadsectorfill_getdotdot:	; This code is really dirty
+	push	si
+	xor	cx, cx
+	xor	bx, bx
+	mov	si, [bp + 16]
+	mov	ax, si
+	test	si, si
+	jz	.recbadsectorfill_dotdotroot
+	push	ds
+	mov	ds, [buf4seg]
+	mov	bx, [si - 8]		; previous entry's starting cluster
+	mov	cx, [si - 10]
+	pop	ds
+.recbadsectorfill_dotdotroot:
+	pop	si
 	ret
 
 	; Given a bad cluster, swaps it for a new cluster and updates pointers
@@ -5125,7 +5138,7 @@ entrytoblock12:
 	and	ax, 0FFFh		; Stupid trick: set media descriptor sends too many bits
 	call	calcoffset12
 	jc	.odd
-	and	[es:bx], word 0FFFh
+	and	[es:bx], word 0F000h
 	or	[es:bx], ax
 	ret
 .odd	mov	cl, 4
@@ -5509,7 +5522,7 @@ reservednames	db	"AUX     "
 		db	0
 lostfnd		db	"LOST    FND"
 
-msg_usage	db	'SSDSCAN alpha1, for 16 bit FAT only', 13, 10
+msg_usage	db	'SSDSCAN alpha2, for 16 bit FAT only', 13, 10
 		db	'Copyright (C) Joshua Hudson 2024-2025', 13, 10
 		db	'Usage: SSDSCAN DRIVE: [/F] [/C] [/D] [/B] [/Z]', 13, 10
 		db	'/F   Fix errors without prompting', 13, 10
