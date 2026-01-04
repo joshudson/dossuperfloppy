@@ -78,7 +78,7 @@ Variables N: number of reserved sectors
           SF: number of sectors in FAT
           SPC: sectors per cluster
           T: total sectors
-          R: root directory sectors =ceil(RE*16/SS)
+          R: root directory sectors = RE*16/SS
           C: clusters = (T-F*SF-N-R) / SPC
 N       reserved sectors
 F*SF    fat sectors
@@ -87,6 +87,9 @@ C*SPC   data sectors
 
 The first reserved sector is the boot sector, which also holds the BPB.
 Additional reserved sectors may hold backup boot sectors.
+
+root directory sectors looks like it should be ceil, but it isn't.
+Rather, root directory count needs to end on a sector boundary.
 
 BIOS Parameter Block:
 
@@ -110,7 +113,7 @@ Address Length Meaning
                DOS before Windows 95 has a hard time with values other than 2
 011     2      Number of root directory entries
                A value of 0 here indicates the root directory is a cluster.
-               On FAT16, cluster 1 refers to it, but DOS cna't do this.
+               On FAT16, cluster 1 refers to it, but DOS can't do this.
 013     2      Total logical sectors. If 0 use offset 020
 015     1      Media descriptor (hard disks must use F8)
 016     2      Sectors per FAT
@@ -171,7 +174,7 @@ FS Info Sector:
 1E4     4      Signature: 72 72 41 61 "rrAa"
 1E8     4      Last known number of free data clusters
 1EC     4      Number of the most recently known to be allocated cluster
-1F0     4      Reserved
+1F0     C      Reserved
 1FC     4      Signature: 00 00 55 AA
 
 The FAT sectors store cluster numbers one after the other. The lowest
@@ -202,6 +205,13 @@ The following characters are not legal in file names:
   - symbols: " * / : < > \ | + , . ; = [ ]
 Yes, space is legal. No, there's no way to type it on the command line.
 Symbols and lowercase letters are legal in volume labels.
+
+Directories other than the root directory always begin with the special
+. and .. entries (which are not present on the root directory); the .
+entry always has itself as the cluster entry, while the .. entry always
+has the parent directory's cluster as the cluster entry. Exception:
+if the parent directory is the root directory, the cluster entry value
+is always zero, even if the root directory is a cluster (such as FAT32).
 
 Directory entry:
 

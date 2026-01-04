@@ -666,7 +666,6 @@ checkdimensions:
 .sm2:
 
 	; Initialize buffer pools
-
 initpools:
 	push	ds
 	pop	es
@@ -2263,7 +2262,7 @@ checkrootclustno:
 	jmp	exit
 
 	; Descend a directory tree. Called once with root dir as argument, and once
-	; for each recovered directory. DX:AX = cluster (0 = root)
+	; for each recovered directory. DX:AX = cluster (0 = root [when not cluster])
 	; DI:SI = caller patchpoint *sector*, BX = caller patchpoint *byte* offset
 	; of start of directory entry. If DI:SI points to start of FAT; BX = 1
 	; which is a special case for update root directory starting cluster.
@@ -2307,8 +2306,16 @@ descendtree:
 	mov	[bp - 14], cx	; BP - 16 = unwind cluster
 	mov	[bp - 16], cx
 	xor	si, si
+	mov	[es:si], cx	; Starting cluster of directory
+	mov	[es:si + 2], cx
+	cmp	ax, [rootclust]
+	jne	.childstart
+	cmp	dx, [rootclust + 2]
+	je	.rootstart
+.childstart:
 	mov	[es:si], ax	; Starting cluster of directory
-	mov	[es:si + 2], dx	; TODO: check if FAT32 wants 0 or cluster for .. to root
+	mov	[es:si + 2], dx
+.rootstart:
 	mov	[es:si + 4], ax	; Current cluster of directory
 	mov	[es:si + 6], dx
 	push	ax
@@ -4152,8 +4159,8 @@ mklostfnd:
 	mov	ax, '. '
 	call	generatedotdirectoryentry
 	mov	ax, '..'
-	mov	cx, [rootclust]		; TODO does FAT32 want 0 here?
-	mov	bx, [rootclust + 2]
+	xor	cx, cx		; .. -> root directory
+	xor	bx, bx
 	call	generatedotdirectoryentry
 	ret
 .mklostfnd_popentry:

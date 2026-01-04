@@ -13,7 +13,16 @@
 %define __NR_dup2 63
 %define __NR_llseek 140
 %define __NR_fdatasync 148
+%define __NR_vfork 190
 %define __NR_ftruncate64 194
+
+%define O_RDONLY 0
+%define O_WRONLY 1
+%define O_RDWR 2
+%define O_CREAT 0100
+%define O_TRUNC 00001000
+%define O_DSYNC 00010000
+%define O_LARGEFILE 00100000
 
 %define BLKFLSBUF 1261h
 %define TCGETS 5401h
