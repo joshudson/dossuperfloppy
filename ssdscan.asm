@@ -393,10 +393,9 @@ stage_media_descriptor:
 	jbe	.rsdbpb
 .rscls	mov	[rootclust], byte 1
 	or	[opflags + 1], byte opflag2_rclust
-	xor	ax, ax
-	jmp	.gtot
+	jmp	.noinf
 
-	; We have an EBPB
+	; We have a FAT32 EBPB
 .rsdbpb	or	[opflags + 1], byte opflag2_ebpb
 .rsebpb	mov	ax, [es:02Ch]
 	mov	dx, [es:02Eh]
@@ -414,7 +413,8 @@ stage_media_descriptor:
 	or	dx, dx
 	jnz	.noinf		; Misaligned!
 	mov	[fatinfosect], ax
-.noinf	jmp	.gtot
+.noinf	xor	bx, bx
+	jmp	.gtot
 	
 .impossible3:
 	jmp	.impossible2
@@ -450,11 +450,10 @@ stage_media_descriptor:
 	jnz	.tot
 	mov	ax, [es:20h]
 	mov	dx, [es:22h]
-.tot:	; Convert total sectors to sectors per cluster
+.tot:	; Convert total sectors to total clusters
 	sub	ax, [es:0Eh]
 	sbb	dx, 0
 	jc	.impossible4
-	sbb	dx, 0
 	mov	ch, 0
 	mov	cl, [es:10h]
 	xor	di, di
@@ -462,9 +461,9 @@ stage_media_descriptor:
 	or	si, si
 	jnz	.totfsl
 	mov	si, [es:24h]
-	mov	di, [es:25h]
+	mov	di, [es:26h]
 .totfsl	sub	ax, si
-	sbb	ax, di
+	sbb	dx, di
 .i4c	jc	.impossible4
 	loop	.totfsl
 	sub	ax, bx		; bx is still number of root dir sectors in FAT sectors
@@ -5566,7 +5565,7 @@ dsc_totalfiles	db	13, 10, 'Total files/directories    : '
 dsc_usedclust	db	13, 10, 'Number of used clusters    : '
 dsc_freeclust	db	13, 10, 'Number of free clusters    : '
 dsc_end:
-msg_error0	db	'Read error accessing boot sector.', 13, 10
+msg_error0	db	' Read error accessing boot sector.', 13, 10
 %ifndef NO_SSDFIXBT
 		db	'This might be recoverable using SSDFIXBT after copying to a new SSD.', 13, 10
 %endif
