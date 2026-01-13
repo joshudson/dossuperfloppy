@@ -438,10 +438,11 @@ stage_media_descriptor:
 	call	.fixup
 	or	dx, dx
 	jnz	.impossible4	; Now that's completely out of range
-	mov	bx, ax
+	push	ax
 	xor	dx, dx
 	call	.fixup
 	mov	[rootdirsects], ax
+	pop	bx
 	;DX must be zero as rootdirentries is only 2 bytes long to begin with
 
 .gtot	xor	dx, dx
