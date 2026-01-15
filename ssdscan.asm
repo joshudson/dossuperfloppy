@@ -186,13 +186,14 @@ stage_media_descriptor:
 	mov	[es:8192], byte 0A0h
 	mov	[es:16384], byte 0A0h
 	xor	dx, dx
-	xor	cx, cx
 	xor	bx, bx
 	call	diskread
 	jnc	.read0
 .error0	xor	dx, dx
 	xor	cx, cx
-	call	diskread0
+	xor	bx, bx
+	xor	ax, ax
+	call	diskread
 	jnc	.read0
 	call	outax
 .errorZ	mov	dx, msg_error0
@@ -216,9 +217,7 @@ stage_media_descriptor:
 	mov	[es:4096], byte 0
 	mov	[es:8192], byte 0
 	mov	[es:16384], byte 0
-	call	invalidatesector
 	xor	dx, dx
-	xor	cx, cx
 	xor	ax, ax
 	xor	bx, bx
 	call	diskread
@@ -241,7 +240,6 @@ stage_media_descriptor:
 	xor	ax, ax
 .mloop	push	ax
 	xor	dx, dx
-	xor	cx, cx
 	mov	es, [buf1seg]
 	cmp	ax, 0
 	je	.rda			; Already read in sector 0 (CF clear if this jump is taken)
@@ -1196,11 +1194,11 @@ initpools:
 	pop	di
 	pop	si
 	pop	cx
+	rcr	bp, 1				; Bitmask of failed FAT reads
 	inc	si
 	inc	si
 	add	ax, [sectsperfat]
 	adc	dx, [sectsperfat + 2]
-	rcr	bp, 1				; Bitmask of failed FAT reads
 	loop	.mdscn
 	cmp	[fattype], byte 12
 	jne	.npxm
