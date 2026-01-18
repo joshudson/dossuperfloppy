@@ -507,16 +507,6 @@ stage_media_descriptor:
 	mov	[endchainlow], dx
 	; We've finished extracting all information from the boot sector
 
-	cmp	[fattype], byte 16
-	jbe	.spcnxfr
-	mov	ah, 9
-	mov	dx, .todofat32
-	int	21h
-	mov	al, error_norun
-	jmp	exit
-.todofat32	db	"TODO: Verify FAT32 is sane", 13, 10, '$'
-.spcnxfr:
-
 	mov	bx, 1			; Find sectors per chunk
 .spcn	test	bx, [sectsperclust]	; So the idea here is if we have an actually aligned
 	jnz	.spcf			; filesystem on an SSD it will read and write in SSD-sized
@@ -1277,8 +1267,8 @@ stage_fat:
 	;bp - 6: lowest cluster number in FAT block
 	;bp - 10: number of entries in a full FAT block
 	;bp - 14: one more than last cluster number in FAT block
-	;bp - 16: number of words in a FAT block
-	;bp - 18: number of entries in a FAT block
+	;bp - 16: number of words in this FAT block
+	;bp - 18: number of entries in this FAT block
 	;bp - 20: best FAT so far
 	;bp - 22: quality of best FAT so far
 	xor	dx, dx
@@ -1299,7 +1289,7 @@ stage_fat:
 	jb	.fat_block_loop
 .set_root_clust_top:
 	call	checkrootclustno
-	mov	ch, 2		; Root cluster is reached
+	mov	ch, 1		; Root cluster is reached
 	call	setbitsclust
 
 .fat_block_loop:
@@ -1310,20 +1300,15 @@ stage_fat:
 	xor	dx, dx
 	jmp	.loop_top_common	; You think I'm going to page a FAT12? You're outta your mind.
 .loop_top_not12:
-	mov	ax, [bytespersector]
-	mul	word [sectsperchunk]	; A chunk can't be bigger than 32KB so DX is always 0
-	shr	ax, 1
-	cmp	[fattype], byte 16
-	je	.loop_top_skip
-	shr	ax, 1
-.loop_top_skip:
+	mov	ax, [bp - 10]
+	xor	dx, dx
 	add	ax, [bp - 6]
 	adc	dx, [bp - 4]
 .loop_top_common:
 	mov	bx, [highestclust]
 	mov	cx, [highestclust + 2]
 	cmp	dx, cx
-	jb	.loop_top_common_short
+	jb	.loop_top_common_fullsize
 	cmp	ax, bx
 	jbe	.loop_top_common_fullsize
 .loop_top_common_short:
@@ -1333,10 +1318,9 @@ stage_fat:
 	mov	[bp - 14], ax
 	mov	[bp - 12], dx
 	sub	ax, [bp - 6]
+	mov	[bp - 18], ax	; actual number of entries in the block
 	call	[entriestowords]
 	mov	[bp - 16], ax
-	call	[entriesperblock]
-	mov	[bp - 18], ax
 	xor	ax, ax
 	mov	[bp - 20], ax	; Nothing selected yet
 	mov	[bp - 22], ax	; Unevaluated
@@ -1480,7 +1464,7 @@ stage_fat:
 	mov	[rootclust], ax
 	mov	[rootclust + 2], dx
 	call	checkrootclustno
-	mov	ch, 2
+	mov	ch, 1
 	call	setbitsclust
 	jmp	.secondfinish
 .secondnormal:
@@ -1742,6 +1726,8 @@ stage_fat:
 .loopmore:
 	mov	[bp - 6], ax
 	mov	[bp - 4], dx
+	cmp	[bp - 18], word 0
+	je	exit
 	mov	di, savedfilename
 	call	incrementprogress
 
@@ -2139,7 +2125,7 @@ setclusterinfats:
 	push	ax
 	push	dx
 	push	di
-	mov	ch, 40h
+	mov	ch, 20h
 	call	diskwrite0
 .skip	pop	di
 	pop	dx
@@ -2232,7 +2218,7 @@ writebackfat:
 	jmp	.loop
 .nom	add	ax, [reservedsects]
 	adc	dx, 0
-	mov	ch, 40h
+	mov	ch, 20h
 	call	diskwrite0	; Doesn't return on failure so no pushf needed
 	cmp	[fattype], byte 12
 	jne	.nopopx
@@ -3383,12 +3369,12 @@ descendtree:
 	ret
 
 .dirwritebackgetch:
-	mov	ch, 0C0h
+	mov	ch, 60h
 	cmp	[es:si + 4], word 0
 	jne	.dirwritebackcluster
 	cmp	[es:si + 6], word 0
 	jne	.dirwritebackcluster
-	mov	ch, 80h
+	mov	ch, 40h
 .dirwritebackcluster:
 	ret
 
@@ -3631,7 +3617,7 @@ recoverbadsector:
 	mov	dx, [bp - 14]
 	add	ax, si
 	adc	dx, 0
-	mov	ch, 0C0h
+	mov	ch, 60h
 	push	si
 	call	diskwrite0
 	pop	si
@@ -3704,7 +3690,7 @@ recoverbadsector:
 	mov	cx, [bp - 10]
 	mov	[es:bx + 14h], cx
 .dirnot32:
-	mov	ch, 0C0h
+	mov	ch, 60h
 	call	diskwrite0
 .nobackupbootsector:
 	pop	word [sectsperchunk]
@@ -3939,7 +3925,7 @@ recoverdirs:
 	jbe	.fat16b
 	mov	cx, [bp - 10]
 	mov	[es:34h], cx
-.fat16b	mov	ch, 0C0h
+.fat16b	mov	ch, 60h
 	call	diskwrite0
 	mov	sp, bp	; Will now call into descendtree
 	mov	ax, [savedfilename]
@@ -4429,7 +4415,7 @@ initdircluster:
 	push	dx
 	push	si
 	push	cx
-	mov	ch, 0Ch
+	mov	ch, 60h
 	call	diskwrite0
 	pop	cx
 	pop	si
@@ -4451,7 +4437,7 @@ initdircluster:
 	call	si
 	pop	dx
 	pop	ax
-	mov	ch, 0C0h
+	mov	ch, 60h
 	call	diskwrite0
 	pop	dx
 	pop	ax
@@ -5280,20 +5266,21 @@ isbadcluster32:
 	ret
 
 ismdesc32:
-	cmp	dx, 0FFFFh
+	and	dx, 0FFFh
+	cmp	dx, 0FFFh
 	jne	.ret
 	cmp	ah, 0FFh
 .ret	ret
 
 	; Directory variant of diskwrite0; sets CH itself but can't write to FAT
 diskwrite0d:
-	mov	ch, 0C0h
+	mov	ch, 60h
 	cmp	dx, [firstclustsect + 2]
 	ja	diskwrite0
 	jb	.root
 	cmp	ax, [firstclustsect]
 	jae	diskwrite0
-.root	mov	ch, 80h
+.root	mov	ch, 40h
 
 	; Writes buffer to sector; trashes all registers but ES, BP
 diskwrite0:
@@ -5364,10 +5351,10 @@ diskread:
 ;DX:AX = sector address
 ;ES:BX = read address
 ;CX = read/write flag: 0 = read, 1 = write; when writing bits 14-13 are
-;	00 - unknown (must be boot sector or reserved sectors)
-;	01 - FAT data
-;	10 - root directory data
-;	11 - file data
+;	00/0 - unknown (must be boot sector or reserved sectors)
+;	01/2 - FAT data
+;	10/4 - root directory data
+;	11/6 - file data
 ;Always reads one chunk size, which may or may not be a whole cluster
 ;The zeroth sector can't be cached for numerous reasons; it's always accessed directly.
 ;This does clobber all registers other than segment registers and bp despite appearing not to
@@ -5409,10 +5396,13 @@ diskreadwrite:
 	stc
 	jnz	.exit
 	or	[opflags + 1], byte opflag2_7305
-.fat32	mov	si, [bp - 4]
+.fat32	push	ss
+	pop	ds
+	mov	si, [bp - 4]
 	lea	bx, [bp - 16]
-	mov	dl, [cs:disk]
+	mov	dl, [disk]
 	inc	dl
+	mov	cx, 0FFFFh	; Call asserts CX=-1
 	mov	ax, 7305h
 	int	21h
 .exit	mov	ds, [bp - 6]

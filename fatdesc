@@ -117,6 +117,8 @@ Address Length Meaning
 013     2      Total logical sectors. If 0 use offset 020
 015     1      Media descriptor (hard disks must use F8)
 016     2      Sectors per FAT
+               FreeDOS uses this as the FAT16 EBPB/FAT32 EBPB decision check.
+               If zero, it's a FAT32 EBPB.
 -- Starting with DOS 3.0 --
 018     2      Sectors per track
 01A     2      Number of heads
