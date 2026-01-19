@@ -74,8 +74,7 @@ _start:
 	cmp	bx, word (stackbottom + 32768) / 16
 	jae	.mem
 .nomem	mov	dx, msg_nocmem
-	mov	ah, 9
-	int	21h
+	call	outstring
 	mov	ax, 4C04h			; We can *NOT* jump to exit here; this will trash DOS
 	int	21h				; as the exit-free memory is unintialized
 .mem	mov	sp, stackbottom	
@@ -138,8 +137,7 @@ _start:
 .o6	or	bl, opflag_x
 	jmp	.b
 .arg	mov	dx, msg_usage
-	mov	ah, 9
-	int	21h
+	call	outstring
 	mov	ax, 4C10h
 	int	21h
 .go	xor	cx, cx
@@ -197,8 +195,7 @@ stage_media_descriptor:
 	jnc	.read0
 	call	outax
 .errorZ	mov	dx, msg_error0
-.errorx	mov	ah, 9
-	int	21h
+.errorx	call	outstring
 	mov	al, error_nofix
 	jmp	exit
 .read0	mov	bx, 16384
@@ -591,8 +588,7 @@ display1:
 	push	ds
 	push	es
 	pop	ds
-	mov	ah, 9	; DX is still 0
-	int	21h
+	call	outstring	; DX is still 0
 	pop	ds
 checkdimensions:
 	cmp	[fattype], byte 12
@@ -605,8 +601,7 @@ checkdimensions:
 	cmp	[highestclust], word 0FFF6h
 	jbe	.sm
 .big	mov	dx, msg_overclust
-.big3	mov	ah, 9
-	int	21h
+.big3	call	outstring
 	mov	al, error_norun
 	jmp	exit
 .sm	mov	cx, [bytespersector]
@@ -778,8 +773,7 @@ initpools:
 %endif
 	jnc	.hcmem
 	mov	dx, msg_nocmem2
-	mov	ah, 9
-	int	21h
+	call	outstring
 	mov	al, error_nofix
 	jmp	exit
 .hcmema	sub	ax, bx		; Add cmempool to pools
@@ -793,6 +787,18 @@ initpools:
 	pop	dx
 	pop	ax	; DX:AX is how many paragraphs we still need
 .hcmem:
+%ifndef FORCE_API
+	push	ax	; Reuse all startup code & memory allocation code as more bitbuffer
+	mov	cx, cs	; trick: no memory is initialized until all is allocated
+	mov	bl, b_mem_internal
+	mov	di, 128
+	mov	ax, (.hmem - _start + 128) / 16
+	xor	dx, dx
+	call	.mcrec
+	pop	ax
+	sub	ax, (.hmem - _start + 128) / 16
+	jna	.hmem
+%endif
 %ifndef NO_DOS_MEM
 	push	ax
 	; Free unused environment
@@ -1047,8 +1053,7 @@ initpools:
 
 .nohmem_final:
 	mov	dx, msg_noram
-.fmemc	mov	ah, 9
-	int	21h
+.fmemc	call	outstring
 	mov	al, error_norun
 	jmp	exit
 .fmem_final:
@@ -1249,8 +1254,7 @@ initpools:
 
 stage_fat:
 	mov	dx, state_fat
-	mov	ah, 9
-	int	21h
+	call	outstring
 	xor	dx, dx
 	mov	ax, [sectsperfat + 2]	; Division is even and only seed for progress bar anyway
 	div	word [sectsperchunk]
@@ -1388,8 +1392,7 @@ stage_fat:
 	cmp	[bp - 20], word 0
 	jne	.quantify_have1
 	mov	dx, msg_nogoodfat
-	mov	ah, 9
-	int	21h
+	call	outstring
 .nofixfatdiff:
 	mov	al, error_nofix
 	jmp	exit
@@ -1767,8 +1770,7 @@ stage_fat:
 	call	scanbitsclust
 stage_dirwalk:
 	mov	dx, state_dir
-	mov	ah, 9
-	int	21h
+	call	outstring
 	xor	ax, ax			; Reset progress
 	mov	[progress], ax
 	mov	[progress + 2], ax
@@ -1801,11 +1803,41 @@ stage_recover:
 
 stage_finalize:
 	call	checkmark
+	cmp	[bytespersector + 1], byte 0	; Smallest possible test for >= 512
+	jne	.ninfo				; bytespersector is known to be a power of 2 already
 	mov	ax, [fatinfosect]
+	test	ax, ax
+	je	.ninfo
 	cmp	ax, [reservedsects]
 	jae	.ninfo
-	;TODO fat info sector check for FAT32
-
+	xor	dx, dx		; FAT info sector check
+	mov	es, [buf1seg]
+	call	diskread0
+	mov	ax, [es:0]
+	cmp	ax, 0
+	je	.irebuild
+	cmp	ax, 0FFFFh
+	je	.irebuild
+	cmp	ax, "RR"
+	jne	.ninfo
+	cmp	[es:2], word "aA"
+	jne	.ninfo
+	cmp	[es:1E4h], word "rr"
+	jne	.ninfo
+	cmp	[es:1E6h], word "AA"
+	jne	.ninfo
+	cmp	[es:1FCh], word 0
+	jne	.ninfo
+	cmp	[es:1FEh], word 0AA55h
+	jne	.ninfo
+	call	setinfo
+	jmp	.ninfo
+.irebuild:
+	mov	di, 2
+	mov	cx, 254
+	repe	scasw
+	jne	.ninfo
+	call	rebuildinfo
 .ninfo	test	[opflags], byte opflag_d
 	jz	.done
 	mov	es, [buf1seg]
@@ -1827,17 +1859,17 @@ stage_finalize:
 	mov	ax, [freeclust]
 	mov	dx, [freeclust + 2]
 	call	gendigitslblcx
+	mov	dx, 0A0Dh
+	stosw
 	mov	al, '$'
 	stosb
 	push	ds
 	push	es
 	pop	ds
 	xor	dx, dx
-	mov	ah, 9
-	int	21h
+	call	outstring
 	pop	ds
-.done	call	newline
-	mov	al, 0
+.done	mov	al, 0
 exit:	mov	ah, 4Ch
 	push	ax
 	cmp	[savedaccessflag], word 0
@@ -1891,9 +1923,8 @@ ctrlchandler:
 	push	cs
 	pop	ds
 	sti
-	mov	ah, 9
 	mov	dx, msg_cancel
-	int	21h
+	call	outstring
 	mov	al, error_cancel
 	jmp	exit
 
@@ -1902,10 +1933,8 @@ iohandler:
 	iret
 
 newbadsectors:
-	call	newline	;$$$
 	mov	dx, msg_replacer
-	mov	ah, 9
-	int	21h
+	call	outstring
 	mov	al, error_nofix
 	jmp	exit
 
@@ -1915,12 +1944,10 @@ newbadsectors:
 queryfixyn:
 	push	dx
 	mov	dx, out_cr
-	mov	ah, 9
-	int	21h
+	call	outstring
 	pop	dx
 queryfixynpostcr:
-	mov	ah, 9
-	int	21h
+	call	outstring
 	test	[opflags], byte opflag_f
 	jnz	.y
 .again	mov	ah, 7
@@ -1936,8 +1963,7 @@ queryfixynpostcr:
 	jne	.again
 .yn	push	ax
 	mov	dx, cx
-	mov	ah, 9
-	int	21h
+	call	outstring
 	pop	ax
 	ret
 .y	push	bp
@@ -1994,27 +2020,6 @@ outax:
 	dec	ch
 	jnz	.nxt
 	pop	bp
-	pop	dx
-	pop	ax
-	ret
-
-; Displays a checkmark
-checkmark:
-	push	ax
-	push	dx
-	mov	dx, out_check
-	mov	ah, 9
-	int	21h
-	pop	dx
-	pop	ax
-	ret
-
-newline:
-	push	ax
-	push	dx
-	mov	dx, out_newline
-	mov	ah, 9
-	int	21h
 	pop	dx
 	pop	ax
 	ret
@@ -2240,8 +2245,7 @@ checkrootclustno:
 	jae	.bad
 .good	ret
 .bad	mov	dx, msg_badroot
-	mov	ah, 9
-	int	21h
+	call	outstring
 	mov	al, error_nofix
 	jmp	exit
 
@@ -2393,8 +2397,7 @@ descendtree:
 .readrootdirbadsector:
 	; A bad sector in the root directory is not recoverable.
 	mov	dx, msg_rootbadsect
-	mov	ah, 9
-	int	21h
+	call	outstring
 	mov	al, error_nofix
 	jmp	exit
 .postreaddirbadsector:			; means after the bad sector check on readdir
@@ -2795,8 +2798,7 @@ descendtree:
 	jmp	.skipentry
 .scannormal_toodeep:
 	mov	dx, msg_toodeep
-	mov	ah, 9
-	int	21h
+	call	outstring
 	mov	al, error_nofix
 	jmp	exit
 .scannormal_directory:
@@ -2890,17 +2892,14 @@ descendtree:
 	jmp	.scannormal_subsequent_bad
 .scannormal_impossiblybig:
 	mov	dx, out_crfile		; Too big
-	mov	ah, 9
-	int	21h
+	call	outstring
 	pop	bx
 	mov	es, [buf2seg]
 	call	.out_entryname
 	mov	dx, msg_2bigfile
-	mov	ah, 9
-	int	21h
+	call	outstring
 	mov	dx, state_dir
-	mov	ah, 9
-	int	21h
+	call	outstring
 	jmp	.scannormal_notdirectory_end2
 .scannormal_subsequent_bad:
 	pop	bx
@@ -3088,13 +3087,11 @@ descendtree:
 .dotentries_nomatch:
 	; It's not a directory; prompt repair/clear
 	mov	dx, out_crfile
-	mov	ah, 9
-	int	21h
+	call	outstring
 	mov	bx, savedfilename
 	call	.out_entrynameds
 	mov	dx, query_dirnot
-	mov	ah, 9
-	int	21h
+	call	outstring
 .again	mov	ah, 7
 	int	21h
 	cmp	al, 3
@@ -3108,8 +3105,7 @@ descendtree:
 	jne	.again
 .yn	push	ax
 	mov	dx, state_dir
-	mov	ah, 9
-	int	21h
+	call	outstring
 	pop	ax
 	cmp	al, 'f'
 	je	.dotentries_isfile
@@ -3198,8 +3194,7 @@ descendtree:
 	;call	newline		; Uncomment during debugging
 	push	dx
 	mov	dx, out_crfile
-	mov	ah, 9
-	int	21h
+	call	outstring
 	pop	dx
 	call	.out_entryname
 	mov	cx, state_dir
@@ -3712,8 +3707,7 @@ alloccluster:
 	push	ax
 	call	scanbitsclust
 	mov	dx, msg_outofspace
-	mov	ah, 9
-	int	21h
+	call	outstring
 	mov	al, error_nofix
 	jmp	exit
 .found	cmp	dx, [highestclust + 2]	; When scanning for zeros, scanbitsclust can return
@@ -3881,14 +3875,12 @@ recoverdirs:
 	cmp	ch, 2
 	je	.foundn		; Ascend one more
 .foundc	mov	dx, query_recdir1	; Prompt
-	mov	ah, 9
-	int	21h
+	call	outstring
 	mov	ax, [bp - 4]
 	mov	dx, [bp - 2]
 	call	.pname
 	mov	dx, query_recdir2
-	mov	ah, 9
-	int	21h
+	call	outstring
 	mov	ax, [bp + 4]
 	mov	dx, [bp + 2]
 	call	.pname
@@ -3985,8 +3977,7 @@ recoverdirs:
 	stosb
 	pop	es
 	mov	dx, savedfilename
-	mov	ah, 9
-	int	21h
+	call	outstring
 .f_ret	ret
 
 recoverfiles:
@@ -4000,11 +3991,9 @@ recoverfiles:
 	mov	al, '$'
 	stosb
 	mov	dx, query_recfile
-	mov	ah, 9
-	int	21h
+	call	outstring
 	mov	dx, savedfilename
-	mov	ah, 9
-	int	21h
+	call	outstring
 	call	queryrecovercommon
 	cmp	al, 'y'
 	pop	dx
@@ -4214,11 +4203,9 @@ mkdirentry:
 
 .rootdirfull:
 	mov	dx, msg_outofslots
-	mov	ah, 9
-	int	21h
+	call	outstring
 	mov	dx, msg_goodenuf
-	mov	ah, 9
-	int	21h
+	call	outstring
 	mov	al, error_nofix
 	jmp	exit
 
@@ -4527,8 +4514,7 @@ incrementprogress:	; DI=pointer to total, destroys nothing
 	mov	ah, 2
 	int	21h
 	mov	dx, out_percentpost
-	mov	ah, 9
-	int	21h
+	call	outstring
 	pop	bp
 	jmp	.r
 
@@ -5087,9 +5073,8 @@ validatehddescriptor:
 	cmp	dl, byte 0FFh
 	jne	.error
 .ret	ret
-.error	mov	ah, 9
-	mov	dx, msg_hdbaddesc
-	int	21h
+.error	mov	dx, msg_hdbaddesc
+	call	outstring
 	mov	al, error_nofix
 	jmp	exit
 
@@ -5111,6 +5096,39 @@ isendchainagnostic:
 totalfileinc:
 	add	[totalfiles], word 1
 	adc	[totalfiles + 2], word 0
+	ret
+
+rebuildinfo:
+	xor	ax, ax
+	xor	di, di
+	mov	cx, 255
+	rep	stosw
+	push	ds
+	push	es
+	pop	ds
+	mov	[0], word "RR"
+	mov	[2], word "aA"
+	mov	[1E4h], word "rr"
+	mov	[1E6h], word "Aa"
+	mov	[1E8h], word 0FFh	; Called rarely, optimized for size
+	mov	[1EAh], word 0FFh
+	mov	[1ECh], word 2		; Safe value
+	mov	[1EEh], word 0
+	mov	[1FEh], word 0AA55h
+	pop	ds
+setinfo:
+	mov	ax, [freeclust]
+	mov	dx, [freeclust + 2]
+	cmp	ax, [es:1E8h]
+	jne	.do
+	cmp	dx, [es:1EAh]
+	jne	.do
+.do	mov	[es:1E8h], ax
+	mov	[es:1EAh], dx
+	mov	ax, [fatinfosect]
+	xor	dx, dx
+	mov	ch, 0
+	call	diskwrite0
 	ret
 
 ; FAT12 has entries that span sectors but we don't play that game; we loaded the whole FAT in that case
@@ -5272,6 +5290,34 @@ ismdesc32:
 	cmp	ah, 0FFh
 .ret	ret
 
+%ifdef DEBUG	; function used in debugging; no callers in release buitls
+newline:	; Displays a newline
+	push	ax
+	push	dx
+	mov	dx, out_newline
+	call	outstring
+	pop	dx
+	pop	ax
+	ret
+%endif
+
+checkmark:	; Displays a checkmark
+%ifdef DEBUG	; function used in debugging; preserves registers
+	push	ax
+	push	dx
+	mov	dx, out_check
+	call	outstring
+	pop	dx
+	pop	ax
+	ret
+%else
+	mov	dx, out_check	; In release, we are free to clobber AX and DX
+%endif
+outstring:	; Outputs $ terminated string in DS:X (DOS call)
+	mov	ah, 9
+	int	21h
+	ret
+
 	; Directory variant of diskwrite0; sets CH itself but can't write to FAT
 diskwrite0d:
 	mov	ch, 60h
@@ -5292,8 +5338,7 @@ diskwrite:
 	jc	.bad
 	ret
 .bad	mov	dx, msg_replace
-	mov	ah, 9
-	int	21h
+	call	outstring
 	mov	al, error_nofix
 	jmp	exit
 
@@ -5442,8 +5487,7 @@ xmscopy	push	si
 .err	xchg	ax, bx
 	call	outax
 	mov	dx, msg_xmserr
-	mov	ah, 9
-	int	21h
+	call	outstring
 	jmp	exit
 
 	align 2, db 0CCh
@@ -5517,8 +5561,8 @@ reservednames	db	"AUX     "
 		db	0
 lostfnd		db	"LOST    FND"
 
-msg_usage	db	'SSDSCAN alpha2, for 16 bit FAT only', 13, 10
-		db	'Copyright (C) Joshua Hudson 2024-2025', 13, 10
+msg_usage	db	'SSDSCAN alpha3', 13, 10
+		db	'Copyright (C) Joshua Hudson 2024-2026', 13, 10
 		db	'Usage: SSDSCAN DRIVE: [/F] [/C] [/D] [/B] [/Z]', 13, 10
 		db	'/F   Fix errors without prompting', 13, 10
 		db	'/C   Check chain length against file length', 13, 10
@@ -5531,7 +5575,7 @@ out_newline	db	13, 10, '$'
 out_crfile	db	13, 'File $'
 msg_nocmem	db	'Insufficient Conventional Memory available to check any disk.', 13, 10, '$'
 msg_nocmem2	db	'Insufficient Conventional Memory available to check this disk.', 13, 10, '$'
-msg_noram	db	'Insufficinet memory available to check this disk.', 13, 10, '$'
+msg_noram	db	'Insufficient memory available to check this disk.', 13, 10, '$'
 msg_fragram	db	'Memory is too fragmented, try rebooting.', 13, 10, '$'
 msg_xmserr	db	'XMS Error', 13, 10, '$'
 msg_cancel	db	"^C: Cancelled", 13, 10, '$'
