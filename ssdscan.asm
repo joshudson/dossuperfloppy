@@ -397,8 +397,8 @@ stage_media_descriptor:
 	mov	[rootclust], ax
 	mov	[rootclust + 2], dx
 	mov	ax, [es:30h]
-	or	ax, ax
-	jne	.noinf
+	test	ax, ax
+	jz	.noinf
 	cmp	ax, [es:0Eh]
 	jae	.noinf
 	mul	word [bytespersector]
@@ -1803,11 +1803,11 @@ stage_recover:
 
 stage_finalize:
 	call	checkmark
-	cmp	[bytespersector + 1], byte 0	; Smallest possible test for >= 512
+	cmp	[bytespersector], byte 0	; Smallest possible test for >= 512
 	jne	.ninfo				; bytespersector is known to be a power of 2 already
 	mov	ax, [fatinfosect]
 	test	ax, ax
-	je	.ninfo
+	jz	.ninfo
 	cmp	ax, [reservedsects]
 	jae	.ninfo
 	xor	dx, dx		; FAT info sector check
@@ -1824,7 +1824,7 @@ stage_finalize:
 	jne	.ninfo
 	cmp	[es:1E4h], word "rr"
 	jne	.ninfo
-	cmp	[es:1E6h], word "AA"
+	cmp	[es:1E6h], word "Aa"
 	jne	.ninfo
 	cmp	[es:1FCh], word 0
 	jne	.ninfo
@@ -1859,7 +1859,6 @@ stage_finalize:
 	mov	ax, [freeclust]
 	mov	dx, [freeclust + 2]
 	call	gendigitslblcx
-	mov	dx, 0A0Dh
 	stosw
 	mov	al, '$'
 	stosb
@@ -1869,7 +1868,8 @@ stage_finalize:
 	xor	dx, dx
 	call	outstring
 	pop	ds
-.done	mov	al, 0
+.done	call	newline
+	mov	al, 0
 exit:	mov	ah, 4Ch
 	push	ax
 	cmp	[savedaccessflag], word 0
@@ -5290,8 +5290,8 @@ ismdesc32:
 	cmp	ah, 0FFh
 .ret	ret
 
-%ifdef DEBUG	; function used in debugging; no callers in release buitls
 newline:	; Displays a newline
+%ifdef DEBUG	; function used in debugging; presserves registers
 	push	ax
 	push	dx
 	mov	dx, out_newline
@@ -5299,6 +5299,9 @@ newline:	; Displays a newline
 	pop	dx
 	pop	ax
 	ret
+%else
+	mov	dx, out_newline	; In release, nobody cares
+	jmp	outstring
 %endif
 
 checkmark:	; Displays a checkmark
