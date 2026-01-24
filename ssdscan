@@ -184,6 +184,8 @@ Garbage past the end of directory marker is removed without prompting.
 All one bits directory entries are changed to deleted entries without
 prompting. This should only occur after bad sector recovery.
 
+FAT32: The number of free clusters is corrected without prompting.
+
 Recover backup boot sector is currently bugged in FreeDOS. The included
 REMAP25.COM can be used to recover it anyway.  The arguments to REMAP25 are
 hard disk number (starts with 1), partition number, and program to run:

@@ -2294,8 +2294,8 @@ descendtree:
 	mov	[bp - 14], cx	; BP - 16 = unwind cluster
 	mov	[bp - 16], cx
 	xor	si, si
-	mov	[es:si], cx	; Starting cluster of directory
-	mov	[es:si + 2], cx
+	mov	[es:si], si	; Starting cluster of directory
+	mov	[es:si + 2], si
 	cmp	ax, [rootclust]
 	jne	.childstart
 	cmp	dx, [rootclust + 2]
@@ -2718,10 +2718,6 @@ descendtree:
 .scannormal_notdirectory_empty0:
 	jmp	.skipentry
 .scannormal_notempty:
-	push	di
-	mov	di, totalfiles
-	call	incrementprogress
-	pop	di
 	push	bx
 	push	si
 	push	ax
@@ -2731,6 +2727,10 @@ descendtree:
 	jz	.scanbits_free
 	test	ch, 1
 	jnz	.scanbits_xlink
+	push	di
+	mov	di, totalfiles
+	call	incrementprogress
+	pop	di
 	mov	ch, 1
 	pop	dx
 	pop	ax
@@ -2807,29 +2807,28 @@ descendtree:
 	ja	.scannormal_toodeep
 	push	ax
 	push	dx
+	push	bx
 	call	.dirwritebackifdirty
+	pop	bx
 	pop	dx
 	pop	ax
 	push	ds			; Need directory name for repair prompts below
-	push	es
-	push	es
 	push	ds
 	pop	es
-	pop	ds
+	mov	ds, [buf2seg]
 	push	si
 	push	di
 	mov	si, bx
 	mov	di, savedfilename
 	mov	cx, 11
 	rep	movsb
+	mov	cx, [bx + 16h]			; DIR created time
+	mov	bx, [bx + 18h]			; DIR created date
 	pop	di
 	pop	si
-	pop	es
 	pop	ds
-	mov	cx, [es:bx + 16h]
 	mov	[savedfilename + 12], cx	; DIR created time
-	mov	cx, [es:bx + 18h]
-	mov	[savedfilename + 14], cx	; DIR created date
+	mov	[savedfilename + 14], bx	; DIR created date
 	mov	es, [buf4seg]
 	add	si, 10
 	mov	[es:si], ax
@@ -3003,8 +3002,6 @@ descendtree:
 	pop	si
 	jc	.scanskipreturn_vnotzero	; Not dealing with this nonsense
 	mov	es, [buf4seg]
-	call	.dirwritebackgetch
-	push	cx
 	mov	bx, [es:si]
 	mov	cx, [es:si + 2]
 	mov	es, [buf2seg]
@@ -3013,9 +3010,9 @@ descendtree:
 	jbe	.scanfixparent_notfat32dentry
 	mov	[es:34h], cx
 .scanfixparent_notfat32dentry:
-	pop	cx			; from .dirwritebackgetch
 	push	si
 	push	di
+	mov	ch, 60h
 	call	diskwrite0
 	pop	di
 	pop	si
@@ -3125,22 +3122,26 @@ descendtree:
 	cmp	[es:1Ah + 32], bx
 	je	.dotentries_match2
 .dotentries_nomatchparent:
-	mov	es, [buf4seg]
-	cmp	[es:si - 10], word 0
-	jne	.dotentries_maybeautofixparent
-	cmp	[es:si - 8], word 0
-	je	.dotentries_noautofixparent	; Flag only exists on not root directory
+	test	bx, bx
+	jnz	.dotentries_maybeautofixparent
+	test	cx, cx
+	jz	.dotentries_noautofixparent	; Flag only exists on not root directory
 .dotentries_maybeautofixparent:			; Otherwise its bit is reused as offset into root
+	mov	es, [buf4seg]
 	test	[es:si - 1], byte 80h
 	mov	es, [buf2seg]
-	je	.dotentries_fixparent
+	jnz	.dotentries_fixparent
 .dotentries_noautofixparent:
 	push	ds
 	pop	es
+	push	bx
+	push	cx
 	mov	bx, savedfilename
 	mov	dx, query_fixdotdot
 	call	.queryfixentry
-	mov	es, [buf4seg]
+	pop	cx
+	pop	bx
+	mov	es, [buf2seg]
 	cmp	al, 'y'
 	jne	.dotentries_match2
 .dotentries_fixparent:
@@ -3178,12 +3179,10 @@ descendtree:
 	and	[bp - 9], byte 0FDh
 	mov	dx, [bp - 36]	; BP - 38 = sector of current dir cluster
 	mov	ax, [bp - 38]
-	mov	es, [buf4seg]
-	call	.dirwritebackgetch
 	mov	es, [buf2seg]
 	push	si
 	push	di
-	call	diskwrite0
+	call	diskwrite0d
 	pop	di
 	pop	si
 	mov	es, [buf4seg]
@@ -3361,16 +3360,6 @@ descendtree:
 	pop	cx
 	pop	bx
 	pop	ax
-	ret
-
-.dirwritebackgetch:
-	mov	ch, 60h
-	cmp	[es:si + 4], word 0
-	jne	.dirwritebackcluster
-	cmp	[es:si + 6], word 0
-	jne	.dirwritebackcluster
-	mov	ch, 40h
-.dirwritebackcluster:
 	ret
 
 .readdirnofixbad:		; We can't recover from skipping this one
@@ -4495,7 +4484,9 @@ incrementprogress:	; DI=pointer to total, destroys nothing
 	jb	.d
 	cmp	ax, [di]
 	jae	.c
-.d	mov	al, [pgdisplay]
+.d	mov	[progress], ax
+	mov	[progress + 2], dx
+	mov	al, [pgdisplay]
 	cmp	al, 100
 	jb	.k
 	mov	al, 99
