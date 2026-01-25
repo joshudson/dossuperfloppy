@@ -377,7 +377,7 @@ stage_media_descriptor:
 	;Root dir uses a cluster
 	mov	[rootdirsects], ax
 	test	[opflags + 1], byte opflag2_ebpb
-	je	.rsebpb
+	jnz	.rsebpb
 	; Check if this is an EBPB by means other than number of root dir entries set
 	cmp	[es:026h], word 0	; Since 16h is filled, 24h must be < 65536
 	jne	.rscls
@@ -1285,13 +1285,13 @@ stage_fat:
 	mov	[bp - 10], ax
 	mov	es, [bitbufseg]
 
+	test	[opflags + 1], byte opflag2_rclust
+	jnz	.fat_block_loop
+	mov	ax, [rootdirsects]
+	test	ax, ax
+	jnz	.fat_block_loop
 	mov	ax, [rootclust]
 	mov	dx, [rootclust + 2]
-	test	dx, dx
-	jnz	.set_root_clust_top
-	cmp	ax, 1
-	jb	.fat_block_loop
-.set_root_clust_top:
 	call	checkrootclustno
 	mov	ch, 1		; Root cluster is reached
 	call	setbitsclust
@@ -2662,12 +2662,7 @@ descendtree:
 	mov	[es:bx + 3], byte '_'	; Trick: no reserved name contains an _; this slot seems most reasonable given the names
 	or	[bp - 9], byte 2	; set dirty bit
 .scanentry_notreserved:
-	xor	dx, dx
-	mov	ax, [es:bx + 1Ah]
-	cmp	[fattype], byte 16
-	jbe	.scannormal_not32get
-	mov	dx, [es:bx + 14h]
-.scannormal_not32get:
+	call	[getdircluster]
 	test	dx, dx
 	jnz	.scannormal_notlow
 	cmp	ax, 1
@@ -2867,14 +2862,11 @@ descendtree:
 	call	.queryfixentry
 	cmp	al, 'y'
 	jne	.scannormal_notdirectory_end2
-	xor	cx, cx
-	cmp	[fattype], byte 16
-	jne	.scannormal_firstbad_not32set
-	mov	[bx + 14h], cx
-.scannormal_firstbad_not32set:
-	mov	[bx + 1Ah], cx
-	mov	[bx + 1Ch], cx
-	mov	[bx + 1Eh], cx
+	xor	dx, dx
+	xor	ax, ax
+	call	[setdircluster]
+	mov	[es:bx + 1Ch], ax
+	mov	[es:bx + 1Eh], ax
 	jmp	.scannormal_notdirectory_end2
 .scannormal_notbad:
 	call	isendchainagnostic
@@ -2938,10 +2930,10 @@ descendtree:
 	adc	di, 0
 	jc	.scannormal_file_nottoolong
 	cmp	di, [bp - 46]
-	jb	.scannormal_file_nottoolong
-	ja	.scannormal_file_toolong
+	ja	.scannormal_file_nottoolong
+	jb	.scannormal_file_toolong
 	cmp	si, [bp - 44]
-	jb	.scannormal_file_tooshort
+	jb	.scannormal_file_toolong
 .scannormal_file_nottoolong:
 	jmp	.scannormal_notdirectory_end3
 .scannormal_file_tooshort:
@@ -2982,12 +2974,7 @@ descendtree:
 	jnz	.scanskipreturn
 	test	al, byte 10h
 	jz	.scanskipreturn
-	mov	ax, [es:bx + 1Ah]
-	xor	dx, dx
-	cmp	[fattype], byte 16
-	jbe	.scanfixparent_notfat32
-	mov	dx, [es:bx + 14h]
-.scanfixparent_notfat32:
+	call	[getdircluster]
 	push	ax
 	push	dx
 	call	.dirwritebackifdirty
@@ -3001,15 +2988,16 @@ descendtree:
 	pop	di
 	pop	si
 	jc	.scanskipreturn_vnotzero	; Not dealing with this nonsense
+	push	ax
+	push	dx
 	mov	es, [buf4seg]
-	mov	bx, [es:si]
-	mov	cx, [es:si + 2]
+	mov	ax, [es:si]
+	mov	dx, [es:si + 2]
 	mov	es, [buf2seg]
-	mov	[es:3Ah], bx
-	cmp	[fattype], byte 16
-	jbe	.scanfixparent_notfat32dentry
-	mov	[es:34h], cx
-.scanfixparent_notfat32dentry:
+	mov	bx, 20h
+	call	[setdircluster]
+	pop	dx
+	pop	ax
 	push	si
 	push	di
 	mov	ch, 60h
@@ -3110,16 +3098,15 @@ descendtree:
 .cc	jmp	ctrlchandler
 .dotentries_match:
 	; Validate parent pointer in ..
+	mov	bx, 20h
+	call	[getdircluster]
 	mov	es, [buf4seg]
 	mov	bx, [es:si - 10]
 	mov	cx, [es:si - 8]
 	mov	es, [buf2seg]
-	cmp	[fattype], byte 16
-	jbe	.dotentries_fat16b
-	cmp	[es:14h + 32], cx
+	cmp	ax, bx
 	jne	.dotentries_nomatchparent
-.dotentries_fat16b:
-	cmp	[es:1Ah + 32], bx
+	cmp	dx, cx
 	je	.dotentries_match2
 .dotentries_nomatchparent:
 	test	bx, bx
@@ -3139,17 +3126,15 @@ descendtree:
 	mov	bx, savedfilename
 	mov	dx, query_fixdotdot
 	call	.queryfixentry
-	pop	cx
+	pop	dx
 	pop	bx
 	mov	es, [buf2seg]
 	cmp	al, 'y'
 	jne	.dotentries_match2
 .dotentries_fixparent:
-	cmp	[fattype], byte 16
-	jbe	.dotentries_fat16c
-	mov	[es:14h + 32], cx
-.dotentries_fat16c:
-	mov	[es:1Ah + 32], bx
+	xchg	ax, bx
+	mov	bx, 20h
+	call	[setdircluster]
 	or	[bp - 9], byte 2	; set dirty bit
 .dotentries_match2:
 	; Start processing normally at the second entry
@@ -3668,12 +3653,13 @@ recoverbadsector:
 	jc	newbadsectors
 	mov	bx, [bp + 4]
 	mov	cx, [bp - 12]
-	mov	[es:bx + 1Ah], cx
-	cmp	[fattype], byte 32
-	jne	.dirnot32
-	mov	cx, [bp - 10]
-	mov	[es:bx + 14h], cx
-.dirnot32:
+	push	ax
+	push	dx
+	mov	ax, [bp - 12]
+	mov	dx, [bp - 10]
+	call	[setdircluster]
+	pop	dx
+	pop	ax
 	mov	ch, 60h
 	call	diskwrite0
 .nobackupbootsector:
@@ -3820,12 +3806,9 @@ recoverdirs:
 	mov	ax, [bp - 12]
 	mov	[bp - 2], dx
 	mov	[bp - 4], ax
-.found	mov	ax, [es:3Ah]
-	xor	dx, dx
-	cmp	[fattype], byte 16
-	jbe	.fat16
-	mov	dx, [es:34h]
-.fat16	mov	bx, [es:16h]
+.found	mov	bx, 20h
+	call	[getdircluster]
+	mov	bx, [es:16h]
 	mov	cx, [es:18h]
 	mov	[bp - 8], bx	; Date+time
 	mov	[bp - 6], cx
@@ -3900,13 +3883,15 @@ recoverdirs:
 	call	sectorfromcluster
 	call	diskread0
 	jc	newbadsectors
-	mov	cx, [bp - 12]
-	mov	[es:3Ah], cx
-	cmp	[fattype], byte 16
-	jbe	.fat16b
-	mov	cx, [bp - 10]
-	mov	[es:34h], cx
-.fat16b	mov	ch, 60h
+	push	ax
+	push	dx
+	mov	bx, 20h
+	mov	ax, [bp - 12]
+	mov	dx, [bp - 10]
+	call	[setdircluster]
+	pop	dx
+	pop	ax
+	mov	ch, 60h
 	call	diskwrite0
 	mov	sp, bp	; Will now call into descendtree
 	mov	ax, [savedfilename]
@@ -4330,12 +4315,10 @@ mkdirentry:
 	jmp	.mkentry_scan
 .founds	cmp	[es:di], byte 0E5h
 	je	.ends1			; Search rule was "empty slot"
-	xor	dx, dx
-	mov	ax, [es:di + 1Ah]
-	cmp	[fattype], byte 16
-	jbe	.found6
-	mov	dx, [es:di + 14h]
-.found6	clc
+	xchg	bx, di
+	call	[getdircluster]
+	xchg	bx, di
+	clc
 	ret
 .ends1	call	.rslot
 .ends2	stc
@@ -4772,7 +4755,6 @@ scanbitsclust:
 	pop	ax
 	dec	bx
 	jnz	.mid
-	jmp	.mid
 	pop	di
 .mide	add	di, [bp - 4]
 	call	.inner
@@ -5222,6 +5204,20 @@ ismdesc16:
 	cmp	ah, 0FFh
 	ret
 
+getdircluster32:
+	mov	dx, [es:bx + 14h]
+	jmp	getdircluster16.e32
+getdircluster16:
+	xor	dx, dx
+.e32	mov	ax, [es:bx + 1Ah]
+	ret
+
+setdircluster32:
+	mov	[es:bx + 14h], dx
+setdircluster16:
+	mov	[es:bx + 1Ah], ax
+	ret
+
 entryfromblock32:
 	mov	bx, di
 	shl	bx, 1
@@ -5498,7 +5494,7 @@ descendtreetable:
 	dw	descendtree.scanvalidatedotentries
 	dw	descendtree.scanlfnsubsequent
 
-fptrcnt	equ	8
+fptrcnt	equ	10
 fptrs12:
 	dw	entriestowords12
 	dw	entryfromblock12
@@ -5508,6 +5504,8 @@ fptrs12:
 	dw	isendchain12
 	dw	isbadcluster12
 	dw	ismdesc12
+	dw	getdircluster16
+	dw	setdircluster16
 
 fptrs16:
 	dw	entriestowords16
@@ -5518,6 +5516,8 @@ fptrs16:
 	dw	isendchain16
 	dw	isbadcluster16
 	dw	ismdesc16
+	dw	getdircluster16
+	dw	setdircluster16
 
 fptrs32:
 	dw	entriestowords32
@@ -5528,6 +5528,8 @@ fptrs32:
 	dw	isendchain32
 	dw	isbadcluster32
 	dw	ismdesc32
+	dw	getdircluster32
+	dw	setdircluster32
 
 reservednames	db	"AUX     "
 		db	"CON     "
@@ -5555,7 +5557,7 @@ reservednames	db	"AUX     "
 		db	0
 lostfnd		db	"LOST    FND"
 
-msg_usage	db	'SSDSCAN alpha3', 13, 10
+msg_usage	db	'SSDSCAN alpha4', 13, 10
 		db	'Copyright (C) Joshua Hudson 2024-2026', 13, 10
 		db	'Usage: SSDSCAN DRIVE: [/F] [/C] [/D] [/B] [/Z]', 13, 10
 		db	'/F   Fix errors without prompting', 13, 10
@@ -5666,6 +5668,11 @@ getblockaddr	resb	2		; on call, CX = number of entries in full block
 isendchain	resb	2
 isbadcluster	resb	2
 ismdesc		resb	2
+getdircluster	resb	2
+setdircluster	resb	2
+		resb	4
+		resb	4
+xmsfunc		resb	4
 
 cmem		resb	2		; Number of usable paragraphs of conventional memory in our memory block beyond the stack
 opflags		resb	2
@@ -5702,19 +5709,13 @@ mklostfndclust	resb	4
 
 rootdirsects	resb	2
 bytesperclust	resb	2
-		resb	2
+wordsperchunk	resb	2
 cmempool	resb	2
 cmempoollen	resb	2
 fattype		resb	1
 descriptor	resb	1
 preserve_sp	resb	2		; Disk access slaughters these registers but we need them back _immediately_
 preserve_bp	resb	2		; These are accessed from cs but we build with cs = ds
-
-xmsfunc		resb	4
-fatinbuf	resb	4
-fatinbitmask	resb	4
-bitmasklen	resb	2
-wordsperchunk	resb	2
 
 totalfiles	resb	4
 progress	resb	4
