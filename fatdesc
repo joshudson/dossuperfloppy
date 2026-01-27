@@ -157,7 +157,6 @@ Differences begin at 024
 042     1      Signature: 28 or 29 (hex)
                28: last field is serial number
                29: last field is file system type
-               all others: last field is Hidden Sectors
 043     4      Volume Serial Number
 047     B(11)  Volume Label
 052     8      File System type, must be "FAT32   "

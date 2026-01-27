@@ -1,4 +1,5 @@
 CPU 8086
+%define DEBUG
 
 ORG 0100h
 
@@ -707,10 +708,11 @@ initpools:
 	; Check if the entire bitmap fits in cmem or not
 	mov	ax, [highestclust]		; Wasting two bits is worth it in instructions saved
 	mov	dx, [highestclust + 2]
+	add	ax, 15
+	adc	dx, 0
 	mov	cx, 6
 .dec2	shr	dx, 1
 	rcr	ax, 1
-	adc	ax, 0
 	loop	.dec2	; When loop terminates, DX:AX is the entire size required in paragraphs
 	mov	si, bitvectorptrs
 %ifdef FORCE_API
@@ -963,6 +965,7 @@ initpools:
 	push	ax
 	xor	di, di
 	mov	cx, [xms_xfer_len]
+	shr	cx, 1
 	xor	ax, ax
 	rep	stosw
 	pop	ax
@@ -972,22 +975,23 @@ initpools:
 	je	.fmem_final
 	push	ax
 	push	dx
-	mov	ah, 8
+.xmrtry	mov	ah, 8
 	call	far [xmsfunc]
 	and	ax, [xms_xfer_dst]
 	jz	.nomorehmemp		; All out
+	xchg	ax, dx
 	mov	cx, dx
 	mov	ah, 9
 	call	far [xmsfunc]
 	cmp	al, 1
-	jne	.nomorehmemp
+	jne	.xmrtry			; did a TSR just allocate memory?
 	push	cx			; Need how many kilobytes l8r
 	mov	di, dx			; handle
 	mov	dx, cx
 	xor	ax, ax			; Shift up 12 times
 	mov	cx, 4			; best impl as up 16, down 4
-.xmssl	shr	ax, 1			; Cannot overflow because
-	rcr	dx, 1			; the starting point fits in 1 register
+.xmssl	shr	dx, 1			; Cannot overflow because
+	rcr	ax, 1			; the starting point fits in 1 register
 	loop	.xmssl
 	mov	bl, b_mem_xms
 	call	.mrec_common
@@ -1122,8 +1126,8 @@ initpools:
 	cmp	bl, byte b_mem_xms
 	jb	.h0seg
 	; It's some kind of API-swapped memory
-	mov	bx, ax
-	mov	di, dx
+	xor	bx, bx
+	xor	di, di
 	mov	cx, [si + bitvectorptr]
 	mov	[xms_xfer_dst], cx
 .cfbcb	mov	[xms_xfer_dstoff], bx		; Right now the only kind of API-swapped memory is XMS so we do that.
@@ -2390,8 +2394,9 @@ descendtree:
 	pop	di
 	pop	si
 	jnc	.postreaddirbadsector
-	mov	cx, [si + 4]
-	or	cx, [si + 6]
+	mov	es, [buf4seg]
+	mov	cx, [es:si]
+	or	cx, [es:si + 2]
 	jz	.readrootdirbadsector
 	jmp	.readdirbadsector
 .readrootdirbadsector:

@@ -13,14 +13,11 @@ disks should be laid out correctly, see SSDFMT.
 
 SSDSCAN is not particular about the kind of DOS it is given, but can
 only scan FAT32 if given a DOS that knows about FAT32. Scanning a
-sufficiently large FAT32 drive also requires XMS memory.  While not as
-memory intensive as other scanners, SSDSCAN uses quite a bit of memory to
-scan large disks. For every 512 byte FAT32 sector, 32 bytes of RAM are
-required. In the pathological case, 1GB RAM may be required, and therefore
-if nothing else uses any XMS memory, 17 handles will suffice; however in
-the very reasonable case of a 2TB disk formatted with 4K clusters, only
-128 MB is requried, which in turn requires only 3 handles. However,
-RAMdrives, some other TSRs, and FreeCOM take up additional handles.
+sufficiently large FAT32 drive also requires XMS memory. SSDSCAN is not
+particularly memory intensive, in the worst case of 268435446 clusters,
+only 64MB of XMS would be required, and therefore any computer posessing
+65MB of RAM can scan any FAT filesystem. This also means you need not
+consider the number of XMS handles unless XMS is fragmented.
 
 When running on disk images mounted over the network, do not accept
 prompts to repair bad sector reads.
