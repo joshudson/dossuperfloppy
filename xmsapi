@@ -90,7 +90,8 @@ or if another application left it in a strange state.
 call AH=08h		Query Free XMS Block
 Returns: AX=size of the largest free XMS block in kilobytes.
 	 DX=total amount of free extended memory
-Errors: BL=80h if the function is not implemented
+Errors: BL=00h if the function succeeds
+	BL=80h if the function is not implemented
 	BL=81h if a VDISK driver is detected
 	BL=A0h if all extended memory is exhausted
 

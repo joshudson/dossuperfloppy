@@ -1,5 +1,4 @@
 CPU 8086
-%define DEBUG
 
 ORG 0100h
 
@@ -58,7 +57,7 @@ stackbottom	equ	(_endbss - _bss + _end - _start + 100h + 768)
 ; buf4seg:0   working buffer (FAT sort and dirwalk)
 ; bitbufseg:0 bitmap buffer, if it needs to exist
 ; xmspinseg:0 second bitmap buffer, if it needs to exist
-; cmempool:0  bitmap pool in main memory
+;             bitmap pool in main memory (computed once)
 ;
 ; ... additional bitmap pool in dos-allocated RAM
 ; ... additional bitmap pool in UMBs if they exist
@@ -687,10 +686,6 @@ initpools:
 	jnz	.dec
 
 .initall:
-	mov	cx, [highestclust]	; copy of highestclust for byte clamping
-	mov	[savedfilename], cx
-	mov	cx, [highestclust + 2]
-	mov	[savedfilename + 2], cx
 	mov	cx, [buf1seg]
 	add	cx, ax
 	mov	[buf2seg], cx
@@ -708,6 +703,10 @@ initpools:
 	; Check if the entire bitmap fits in cmem or not
 	mov	ax, [highestclust]		; Wasting two bits is worth it in instructions saved
 	mov	dx, [highestclust + 2]
+	mov	[savedfilename], ax		; copy of highestclust for byte clamping
+	mov	[savedfilename + 2], dx
+	mov	[savedfilename + 4], ax		; copy of highestclust as # clusters remaining
+	mov	[savedfilename + 6], dx		; to allocate space for
 	add	ax, 15
 	adc	dx, 0
 	mov	cx, 6
@@ -724,23 +723,22 @@ initpools:
 	add	di, [cmem]
 	sub	di, ax
 	jb	.cbigr
-	mov	[cmempoollen], di	; Remember rest of conventional memory (in case something needs it)
-	mov	dx, [bitbufseg]		; Pool fits in conventional memory, bitbufseg unneeded
-	add	dx, ax
-	mov	[cmempool], dx
-	xor	dx, dx
+	mov	ax, [highestclust]
+	mov	dx, [highestclust + 2]
 	mov	cx, [bitbufseg]
 	mov	bl, b_mem_internal
 	call	.mcrec0			; Record single entry for all memory
 	jmp	.hmem
-.mcrec0	xor	di, di			; BL = type, CX = segment, DX:AX = how many paragraphs
-.mcrec	push	cx			; DI = offset
+.mcrec0p:
+	push	cx
 	mov	cx, 6
-.mcmm	shl	ax, 1
+.mcrec0pl:
+	shl	ax, 1
 	rcl	dx, 1
-	loop	.mcmm
+	loop	.mcrec0pl
 	pop	cx
-.mrec_common:				; BL = type, CX:DI = ptr, DX:AX = how many cells
+.mcrec0	xor	di, di
+.mrec_common:				; BL = type, CX:DI = ptr, DX:AX = how many clusters
 	cmp	dx, [savedfilename + 2]
 	jb	.mcrecl
 	ja	.mcrech
@@ -756,6 +754,19 @@ initpools:
 	mov	[si + bitvectorlength], ax
 	mov	[si + bitvectorlength + 2], dx
 	add	si, bitvectorrlen
+	sub	[savedfilename + 4], ax
+	sbb	[savedfilename + 6], dx
+	jc	.mrec_lastc
+	cmp	[savedfilename + 6], word 0
+	jne	.mrec_notlast
+	cmp	[savedfilename + 4], word 0
+	jne	.mrec_last
+.mrec_notlast:
+	clc
+	ret
+.mrec_lastc:
+.mrec_last:
+	stc
 	ret
 .cbigr	mov	cx, [bitbufseg]
 	add	cx, bx		; BX preserved the entire time: size of bitbufseg required
@@ -766,7 +777,6 @@ initpools:
 	shl	bx, cl
 	mov	[bitbuflen], bx
 	pop	cx
-	mov	[cmempool], cx	; There's no pool (len = 0); remember length of bitbufseg = cmempool - bitbufseg
 	mov	bx, ds
 	add	bx, [cmem]
 	sub	bx, cx
@@ -777,32 +787,24 @@ initpools:
 	mov	dx, msg_nocmem2
 	call	outstring
 	mov	al, error_nofix
-	jmp	exit
-.hcmema	sub	ax, bx		; Add cmempool to pools
-	sbb	dx, 0
-	push	ax
-	push	dx
-	mov	ax, bx
+.hcmema	mov	ax, bx		; use the rest
 	xor	dx, dx
 	mov	bl, b_mem_internal
-	call	.mcrec0
-	pop	dx
-	pop	ax	; DX:AX is how many paragraphs we still need
+	call	.mcrec0p
 .hcmem:
 %ifndef FORCE_API
-	push	ax	; Reuse all startup code & memory allocation code as more bitbuffer
 	mov	cx, cs	; trick: no memory is initialized until all is allocated
 	mov	bl, b_mem_internal
 	mov	di, 128
 	mov	ax, (.hmem - _start + 128) / 16
 	xor	dx, dx
-	call	.mcrec
-	pop	ax
-	sub	ax, (.hmem - _start + 128) / 16
-	jna	.hmem
+	call	.mrec_common
+	jc	.apimem
+.hcxvmem:
+	jmp	.hmem
+.apimem:
 %endif
 %ifndef NO_DOS_MEM
-	push	ax
 	; Free unused environment
 	mov	es, [2Ch]
 	mov	ax, es
@@ -822,14 +824,11 @@ initpools:
 	int	21h
 	jc	.nlink
 	or	[opflags + 1], byte opflag2_ulink
-.nlink	pop	ax
-	; Allocate DOS memory; early limit to avoid breaking down in the rare case of excessive fragmentation
+.nlink:	; Allocate DOS memory; early limit to avoid breaking down in the rare case of excessive fragmentation
 	mov	di, bitvectorptrs + bitvectorrlen * 60
 	call	.dosalloc
-	jz	.hmem
+	jc	.hmem
 %endif
-	push	ax
-	push	dx
 	push	ds
 	pop	es
 	mov	ax, 4300h
@@ -840,11 +839,7 @@ initpools:
 	int	2fh
 	mov	[xmsfunc], bx
 	mov	[xmsfunc + 2], es
-	pop	dx
-	pop	ax
 %ifndef NO_HIGH_MEM
-	push	ax
-	push	dx
 	mov	ah, 1
 	mov	dx, -1	; Get it all
 	mov	ah, 1
@@ -855,23 +850,21 @@ initpools:
 	mov	ax, 4A01h
 	int	2fh
 	test	bx, bx	; ES:DI = ptr, BX = len
-	jz	.nohim
+	jz	.himemdone
 	mov	ax, di
 	neg	ax
-	mov	cl, 4
-	shr	ax, cl
-	jz	.nohim
+	xor	dx, dx
+	shl	ax, 1
+	rcl	dx, 1
+	shl	ax, 1
+	rcl	dx, 1
 	push	ax
 	call	.a20e
 	pop	ax
-	jz	.nohim
-	push	ax
-	xor	dx, dx
+	jz	.himemdone
 	mov	cx, es
 	mov	bl, b_mem_internal
-	call	.mcrec
-	pop	cx
-	jmp	.hmpost
+	jmp	.himemrecord
 .himem	call	.a20e
 	je	.noa20h
 	xor	dx, dx
@@ -879,18 +872,7 @@ initpools:
 	mov	cx, 0FFFFh
 	mov	di, 10h
 	mov	bl, b_mem_high
-	call	.mcrec
-	mov	cx, 0FFEh
-.hmpost	pop	dx
-	pop	ax
-	sub	ax, cx
-	sbb	dx, 0
-	jnc	.hmd
-.hmz	jmp	.hmem
-.hmd	jnz	.himemdone
-	test	ax, ax
-	jz	.hmz
-	jmp	.himemdone
+	jmp	.himemrecord
 .a20e	mov	ah, 7
 	call	far [xmsfunc]
 	cmp	al, 0
@@ -903,52 +885,43 @@ initpools:
 .a20f	ret	; returns ZF set = no A20, ZF clear = A20
 .noa20h	mov	ah, 2
 	call	far [xmsfunc]
-.nohim	pop	dx
-	pop	ax
+	jmp	.himemdone
+.himemrecord:
+	call	.mrec_common
+	jc	.hmem
 .himemdone:
 %endif
 %ifndef NO_UMB_MEM
 	mov	cx, 2000h
-.nxtumb	push	ax
-	push	dx
-	mov	dx, cx
+.nxtumb	mov	dx, cx
 .nxtum2	mov	ah, 10h
 	call	far [xmsfunc]
 	test	ax, ax
 	jz	.noumb
-	push	dx
 	xor	ax, ax
 	mov	cx, bx
 	xchg	ax, dx
 	mov	bl, b_mem_umb
-	call	.mcrec0
-	pop	cx
-	pop	dx
-	pop	ax
-	sub	ax, cx
-	sbb	dx, 0
-	jc	.uhmem
-	jnz	.nxtumb
-	test	ax, ax
-	jnz	.nxtumb
-.uhmem	jmp	.hmem
+	call	.mcrec0p
+	jc	.hmem
 .noumb	cmp	bl, 0B0h
 	je	.nxtum2		; There's a smaller UMB and it told us how big
-	pop	dx
-	pop	ax
 %endif
 %ifndef FORCE_API
-	or	dx, dx
-	jnz	.try_xms_for_real
-	mov	bx, [cmempool]
-	sub	bx, [bitbufseg]
-	cmp	ax, bx
+	xor	dx, dx
+	mov	ax, [bitbuflen]
+	mov	cl, 6
+	shl	ax, cl		; There can't be more than 16k entries per chunk
+	cmp	[savedfilename + 6], dx
+	jne	.try_xms_for_real
+	cmp	[savedfilename + 4], ax
 	ja	.try_xms_for_real
 	mov	ax, bx			; Total XMS memory requirement fits in XMS buffer
+	shl	ax, 1			; There are two buffers
 	mov	bl, b_mem_internal
 	mov	cx, [bitbufseg]
 	call	.mcrec0
-.xmnuf	jmp	.hmem
+	jmp	.hmem
 .try_xms_for_real:
 %endif
 %ifndef NO_XMS
@@ -973,19 +946,18 @@ initpools:
 .xmsalloc:				; Note that we don't care at all about over-allocation
 	cmp	si, bitvectorptrs + bitvectorrlen * 128	; In case someone really does have >64 handles
 	je	.fmem_final
-	push	ax
-	push	dx
 .xmrtry	mov	ah, 8
 	call	far [xmsfunc]
+	test	bl, bl
+	jnz	.nomorehmem		; all out
 	and	ax, [xms_xfer_dst]
-	jz	.nomorehmemp		; All out
+	jz	.nomorehmem		; not enough left
 	xchg	ax, dx
 	mov	cx, dx
 	mov	ah, 9
 	call	far [xmsfunc]
 	cmp	al, 1
 	jne	.xmrtry			; did a TSR just allocate memory?
-	push	cx			; Need how many kilobytes l8r
 	mov	di, dx			; handle
 	mov	dx, cx
 	xor	ax, ax			; Shift up 12 times
@@ -995,62 +967,27 @@ initpools:
 	loop	.xmssl
 	mov	bl, b_mem_xms
 	call	.mrec_common
-	pop	di
-	xor	bx, bx
-	shr	di, 1			; Shift down 6 times
-	rcr	bx, 1			; best done as up 8 down 2
-	shr	di, 1
-	rcr	bx, 1
-	pop	dx
-	pop	ax
-	sub	ax, bx
-	sbb	dx, di
-	jc	short .xmnuf
-	jnz	.xmsalloc
-	or	ax, ax
-	jnz	.xmsalloc
-	jmp	.nomorehmem
-%endif
-%ifdef FORCE_API
-.xmnuf	jmp	.hmem
-%endif
-
-.nohmem:				; High memory API not available
-	pop	dx
-	pop	ax
-%ifndef FORCE_API
-	push	ax			; Scavenge XMS memory buffers
-	push	dx
-	mov	ax, [cmempool]
-	sub	ax, [bitbufseg]
-	mov	bl, b_mem_internal
-	mov	cx, [bitbufseg]
-	xor	dx, dx
-	push	ax
-	call	.mcrec0
-	pop	cx
-	pop	dx
-	pop	ax
-	sub	ax, cx
-	sbb	dx, 0
-	jc	.nohmem_vok
-	jnz	.nomorehmem
-	or	ax, ax
-	jnz	.nomorehmem
-.nohmem_vok:
+	jnc	.xmsalloc
 	jmp	.hmem
 %endif
 
-.nomorehmemp:
-	cmp	bp, si
-	je	.nohmem			; Never allocated XMS
-	pop	dx
-	pop	ax
+.nohmem:				; High memory API not available
+%ifndef FORCE_API
+	xor	dx, dx			; Scavenge XMS memory buffers
+	mov	ax, [bitbuflen]
+	mov	cl, 7
+	shl	ax, cl			; There can't be more than 16k entries per chunk
+	mov	bl, b_mem_internal
+	mov	cx, [bitbufseg]
+	call	.mcrec0
+	jc	.hmem
+%endif
+
 .nomorehmem:
 	mov	di, bitvectorptrs + bitvectorrlen * 128
 %ifndef NO_DOS_MEM
 	call	.dosalloc
-	jz	.hmem
+	jc	.hmem
 %endif
 	cmp	si, di
 	je	.fmem_final
@@ -1067,45 +1004,27 @@ initpools:
 .dosalloc:
 	cmp	si, di
 	je	.dosalloc_stop
-	push	ax
-	push	dx
-.dosalloc_rtr:
 	mov	bx, 0FFFFh
 	mov	ah, 48h
 	int	21h
 	cmp	al, 8
-	jne	.dosalloc_zero
+	jne	.dosalloc_stop	; DOS can't allocate but it's not too much RAM
 	test	bx, bx
-	jz	.dosalloc_no
+	jz	.dosalloc_stop	; No RAM left
 	mov	ax, bx
 	mov	ah, 48h
 	int	21h
-	jc	.dosalloc_rtr	; Did a TSR just allocate memory?
+	jc	.dosalloc	; Did a TSR just allocate memory?
 	xchg	ax, cx
 	xchg	ax, bx		; CX = seg, AX = para
-	xor	dx, dx
 	mov	bl, b_mem_dos
-	push	ax
 	push	di
-	call	.mcrec0
+	call	.mcrec0p
 	pop	di
-	pop	cx
-	pop	dx
-	pop	ax
-	sub	ax, cx
-	sbb	dx, 0
-	mov	cx, [savedfilename]
-	or	cx, [savedfilename + 2]
-	jnz	.dosalloc
-	ret		; Z flag is set
-.dosalloc_no:
-	or	di, di	; Clear Z flag
-.dosalloc_zero:
-	pop	dx
-	pop	ax
-	ret		; Z flag is set
+	jnc	.dosalloc
+	ret		; C flag is set
 .dosalloc_stop:
-	or	di, di	; clear Z flag
+	clc
 	ret
 
 .hmem:	; All memory allocated
@@ -1889,19 +1808,14 @@ exit:	mov	ah, 4Ch
 	call	far [xmsfunc]
 .na20	mov	si, bitvectorptrs
 .free	mov	al, [si + bitvectortype]
-	cmp	al, b_mem_internal
-	jb	.fdone2
-	je	.fdone
+	cmp	al, 0
+	je	.fdone2
 	cmp	al, b_mem_umb
-	jb	.fdos
+	jb	.fdone	; DOS frees our memory on exit for us
 	je	.fumb
 	cmp	al, b_mem_xms
 	jb	.fhi
 	jmp	.fxms	; must be XMS (fix this if ever add EMS)
-.fdos	mov	es, [si + bitvectorptr]
-	mov	ah, 49h
-	int	21h
-	jmp	.fdone
 .fumb	mov	ah, 11h
 	mov	dx, [si + bitvectorptr]
 	call	far [xmsfunc]
@@ -4772,7 +4686,7 @@ scanbitsclust:
 	pop	bp
 	ret	2
 .fault	mov	ax, [si + bitvectortype]
-	call	outax
+	call	outax			; TODO debug why we get here
 	jmp	exit
 .xms	mov	[bp - 4], word 0	; Always use seg pointers for XMS
 	mov	[bp - 8], ax		; Initial offset, used later
@@ -5676,7 +5590,7 @@ ismdesc		resb	2
 getdircluster	resb	2
 setdircluster	resb	2
 		resb	4
-		resb	4
+zerothclustsect	resb	4		; Optimization hack: direct multiply and add to get sector
 xmsfunc		resb	4
 
 cmem		resb	2		; Number of usable paragraphs of conventional memory in our memory block beyond the stack
@@ -5706,17 +5620,11 @@ rootdirentries	resb	4
 sectsperfat	resb	4
 firstclustsect	resb	4
 
-zerothclustsect	resb	4		; Optimization hack: direct multiply and add to get sector
-highestclust	resb	4
-endchainlow	resb	2
-savedaccessflag	resb	2
-mklostfndclust	resb	4
-
 rootdirsects	resb	2
 bytesperclust	resb	2
 wordsperchunk	resb	2
-cmempool	resb	2
-cmempoollen	resb	2
+endchainlow	resb	2
+savedaccessflag	resb	2
 fattype		resb	1
 descriptor	resb	1
 preserve_sp	resb	2		; Disk access slaughters these registers but we need them back _immediately_
@@ -5743,8 +5651,8 @@ pines		resb	2
 pinlow		resb	4
 pinhigh		resb	4
 pinoff		resb	4
-		resb	4
-		resb	4
+highestclust	resb	4
+mklostfndclust	resb	4
 
 savedfilename	resb	16		; Saved file name and time (keep me on bottom)
 
