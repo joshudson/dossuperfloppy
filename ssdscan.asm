@@ -721,7 +721,8 @@ initpools:
 	jnz	short .cbigr
 	mov	di, ds
 	add	di, [cmem]
-	sub	di, ax
+	sub	di, [bitbufseg]
+	cmp	di, ax
 	jb	.cbigr
 	mov	ax, [highestclust]
 	mov	dx, [highestclust + 2]
@@ -730,6 +731,7 @@ initpools:
 	call	.mcrec0			; Record single entry for all memory
 	jmp	.hmem
 .mcrec0p:
+	xor	dx, dx
 	push	cx
 	mov	cx, 6
 .mcrec0pl:
@@ -760,7 +762,7 @@ initpools:
 	cmp	[savedfilename + 6], word 0
 	jne	.mrec_notlast
 	cmp	[savedfilename + 4], word 0
-	jne	.mrec_last
+	je	.mrec_last
 .mrec_notlast:
 	clc
 	ret
@@ -787,20 +789,19 @@ initpools:
 	mov	dx, msg_nocmem2
 	call	outstring
 	mov	al, error_nofix
+	jmp	exit
 .hcmema	mov	ax, bx		; use the rest
-	xor	dx, dx
 	mov	bl, b_mem_internal
 	call	.mcrec0p
 .hcmem:
 %ifndef FORCE_API
 	mov	cx, cs	; trick: no memory is initialized until all is allocated
 	mov	bl, b_mem_internal
-	mov	di, 128
-	mov	ax, (.hmem - _start + 128) / 16
+	mov	di, 64
+	mov	ax, .hmem - _start + 64
 	xor	dx, dx
 	call	.mrec_common
-	jc	.apimem
-.hcxvmem:
+	jnc	.apimem
 	jmp	.hmem
 .apimem:
 %endif
@@ -829,8 +830,6 @@ initpools:
 	call	.dosalloc
 	jc	.hmem
 %endif
-	push	ds
-	pop	es
 	mov	ax, 4300h
 	int	2fh
 	cmp	al, 80h
@@ -845,30 +844,14 @@ initpools:
 	mov	ah, 1
 	call	far [xmsfunc]
 	cmp	ax, 1
-	je	.himem
-	xor	bx, bx
-	mov	ax, 4A01h
-	int	2fh
-	test	bx, bx	; ES:DI = ptr, BX = len
-	jz	.himemdone
-	mov	ax, di
-	neg	ax
-	xor	dx, dx
-	shl	ax, 1
-	rcl	dx, 1
-	shl	ax, 1
-	rcl	dx, 1
-	push	ax
-	call	.a20e
-	pop	ax
-	jz	.himemdone
-	mov	cx, es
-	mov	bl, b_mem_internal
-	jmp	.himemrecord
+	jne      .himemdone
+	;Code used to live here to get the DOS suballocation RAM and use it
+	;however DOS is actaully using it for something without allocating it
+	;(maybe because we aren't a driver).
 .himem	call	.a20e
 	je	.noa20h
-	xor	dx, dx
-	mov	ax, 0FFFh
+	mov	dx, 3
+	mov	ax, 0FFC0h
 	mov	cx, 0FFFFh
 	mov	di, 10h
 	mov	bl, b_mem_high
@@ -935,6 +918,7 @@ initpools:
 	not	bx
 	mov	[xms_xfer_dst], bx	; stuff in dst handle
 	mov	es, [bitbufseg]
+	mov	[xms_xfer_srcoff + 2], es
 	push	ax
 	xor	di, di
 	mov	cx, [xms_xfer_len]
@@ -1011,7 +995,6 @@ initpools:
 	jne	.dosalloc_stop	; DOS can't allocate but it's not too much RAM
 	test	bx, bx
 	jz	.dosalloc_stop	; No RAM left
-	mov	ax, bx
 	mov	ah, 48h
 	int	21h
 	jc	.dosalloc	; Did a TSR just allocate memory?
@@ -1052,12 +1035,10 @@ initpools:
 .cfbcb	mov	[xms_xfer_dstoff], bx		; Right now the only kind of API-swapped memory is XMS so we do that.
 	mov	[xms_xfer_dstoff + 2], di
 	push	ax
-	mov	ax, [si + bitvectorptr]
-	mov	[xms_xfer_src], ax
 	call	xmscopy
 	pop	ax
 	add	bx, [xms_xfer_len]
-	add	di, 0
+	adc	di, 0
 	sub	ax, [xms_xfer_len]
 	sbb	dx, 0
 	jc	.lfatn
@@ -1066,10 +1047,9 @@ initpools:
 	jnz	.cfbcb
 	jmp	.lfatn
 .h0seg	mov	es, [si + bitvectorptr + 2]	; Fundamental assumption: a *big* record is paragraph aligned
-	inc	ax
 	shr	ax, 1
-	push	ax
 	pushf
+	push	ax
 	or	dx, dx
 	jz	.h0snl
 .h0sl	mov	cx, 32768
@@ -1081,11 +1061,11 @@ initpools:
 	mov	es, ax
 	dec	dx
 	jnz	.h0sl
-.h0snl	popf
-	pop	cx
+.h0snl	pop	cx
 	xor	ax, ax
 	mov	di, [si + bitvectorptr]
 	rep	stosw
+	popf
 	jnc	.lfatn
 	stosb
 .lfatn	add	si, bitvectorrlen
@@ -1236,6 +1216,7 @@ stage_fat:
 	mov	cx, [highestclust + 2]
 	cmp	dx, cx
 	jb	.loop_top_common_fullsize
+	ja	.loop_top_common_short
 	cmp	ax, bx
 	jbe	.loop_top_common_fullsize
 .loop_top_common_short:
@@ -4547,9 +4528,11 @@ swapbitsclustcommon:
 	dec	bx
 	cmp	[bx + bitvectortype], byte b_mem_xms
 	jb	.clean
-	les	ax, [si + 2]	; XMS write up
-	mov	[xms_xfer_src], word ax
-	mov	[xms_xfer_srcoff], word ax
+	call	checkmark	; Currently shouldn't get here ...
+	mov	es, [si - 2]; XMS write up
+	xor	ax, ax
+	mov	[xms_xfer_src], ax
+	mov	[xms_xfer_srcoff], ax
 	mov	[xms_xfer_srcoff + 2], es
 	mov	ax, [bx + bitvectorptr]
 	mov	[xms_xfer_dst], ax
@@ -4572,6 +4555,10 @@ swapbitsclustcommon:
 	mov	[si + 12], dx
 	jmp	.ret
 .fault	mov	si, bx
+%if DEBUG
+	mov	ax, [bp + 8]
+	mov	dx, [bp + 10]
+%endif
 	jmp	scanbitsclust.fault
 .xms:	mov	ax, [bp - 4]		; Compute offset alignment, so that we can use equality comparison
 	mov	dx, [bp - 2]		; rather than overlap comparison for XMS buffers
@@ -4582,16 +4569,18 @@ swapbitsclustcommon:
 	inc	cx
 	mov	[si + 6], ax		; Normalized offset & offset + length
 	mov	[si + 8], dx
-	add	ax, cx		; Cannot overflow
+	add	ax, cx
+	adc	dx, 0
 	mov	[si + 10], ax
 	mov	[si + 12], dx
 	sub	ax, cx
+	sbb	dx, 0
 	call	.load
 	mov	es, [si - 2]	; Buffer sector
 	shr	dx, 1		; Compute offset into XMS buffer
-	ror	ax, 1
+	rcr	ax, 1
 	shr	dx, 1
-	ror	ax, 1
+	rcr	ax, 1
 	mov	[si + 14], ax
 	mov	[si + 16], dx
 	mov	[xms_xfer_srcoff], ax
@@ -4617,7 +4606,7 @@ swapbitsclustcommon:
 .base	mov	ax, [bp + 8]		; base = requested - offset
 	mov	dx, [bp + 10]
 	sub	ax, [bp - 4]
-	sub	dx, [bp - 2]
+	sbb	dx, [bp - 2]
 	ret
 .load	mov	[si], bx
 	mov	cx, [bx + bitvectorptr]
@@ -4685,8 +4674,15 @@ scanbitsclust:
 	mov	sp, bp
 	pop	bp
 	ret	2
-.fault	mov	ax, [si + bitvectortype]
-	call	outax			; TODO debug why we get here
+.fault:
+%if DEBUG
+	xchg	ax, dx
+	call	outax
+	xchg	ax, dx
+	call	outax
+%endif
+	mov	ax, [si + bitvectortype]
+	call	outax
 	jmp	exit
 .xms	mov	[bp - 4], word 0	; Always use seg pointers for XMS
 	mov	[bp - 8], ax		; Initial offset, used later
