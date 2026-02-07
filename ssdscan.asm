@@ -741,8 +741,8 @@ initpools:
 	pop	cx
 .mcrec0	xor	di, di
 .mrec_common:				; BL = type, CX:DI = ptr, DX:AX = how many clusters
-	cmp	dx, [savedfilename + 2]
-	jb	.mcrecl
+	cmp	dx, [savedfilename + 2] ; If how many clusters isn't a multiple of 4 (whole byte)
+	jb	.mcrecl			; and this isn't the last allocation, bad things happen.
 	ja	.mcrech
 	cmp	ax, [savedfilename]
 	jbe	.mcrecl
@@ -798,7 +798,7 @@ initpools:
 	mov	cx, cs	; trick: no memory is initialized until all is allocated
 	mov	bl, b_mem_internal
 	mov	di, 64
-	mov	ax, .hmem - _start + 64
+	mov	ax, (.hmem - _start + 64) * 4
 	xor	dx, dx
 	call	.mrec_common
 	jnc	.apimem
@@ -1675,12 +1675,17 @@ stage_fat:
 stage_dirwalk:
 	mov	dx, state_dir
 	call	outstring
-	xor	ax, ax			; Reset progress
-	mov	[progress], ax
-	mov	[progress + 2], ax
-	mov	[pgdisplay], al
 	mov	ax, [rootclust]
 	mov	dx, [rootclust + 2]
+	xor	cx, cx			; Reset progress
+	mov	[progress + 2], cx
+	mov	[pgdisplay], cl
+	test	ax, ax
+	jnz	.rclst
+	test	dx, dx
+	jz	.rflt
+.rclst	mov	cl, 100			; Count root pointer in progress
+.rflt	mov	[progress], cx
 	mov	si, [reservedsects]
 	mov	di, [reservedsects + 2]
 	mov	bx, 1
@@ -1763,7 +1768,6 @@ stage_finalize:
 	mov	ax, [freeclust]
 	mov	dx, [freeclust + 2]
 	call	gendigitslblcx
-	stosw
 	mov	al, '$'
 	stosb
 	push	ds
@@ -2290,8 +2294,8 @@ descendtree:
 	pop	si
 	jnc	.postreaddirbadsector
 	mov	es, [buf4seg]
-	mov	cx, [es:si]
-	or	cx, [es:si + 2]
+	mov	cx, [es:si + 4]
+	or	cx, [es:si + 6]
 	jz	.readrootdirbadsector
 	jmp	.readdirbadsector
 .readrootdirbadsector:
@@ -4528,7 +4532,6 @@ swapbitsclustcommon:
 	dec	bx
 	cmp	[bx + bitvectortype], byte b_mem_xms
 	jb	.clean
-	call	checkmark	; Currently shouldn't get here ...
 	mov	es, [si - 2]; XMS write up
 	xor	ax, ax
 	mov	[xms_xfer_src], ax
@@ -4555,7 +4558,7 @@ swapbitsclustcommon:
 	mov	[si + 12], dx
 	jmp	.ret
 .fault	mov	si, bx
-%if DEBUG
+%ifdef DEBUG
 	mov	ax, [bp + 8]
 	mov	dx, [bp + 10]
 %endif
@@ -4675,7 +4678,7 @@ scanbitsclust:
 	pop	bp
 	ret	2
 .fault:
-%if DEBUG
+%ifdef DEBUG
 	xchg	ax, dx
 	call	outax
 	xchg	ax, dx
