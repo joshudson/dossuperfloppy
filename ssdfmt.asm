@@ -1,4 +1,4 @@
-; Copyright Joshua Hudson 2022-25
+; Copyright Joshua Hudson 2022-26
 
 ; Next up: FAT32 part of rebuild
 
@@ -21,20 +21,20 @@ _start:
 	add	di, ax
 	call	detectdos
 	jnz	.dos
+.bios	int	12h
+	xchg	ax, cx
+	sub	cx, di
+	jmp	.known
 .dos	sub	di, 11h
 	mov	ds, di
 	mov	cx, [3]	; Get actual length from MCB
 	sub	cx, 11h
 	add	di, 11h
-	jmp	.known
-.bios	int	12h
-	xchg	ax, cx
-	sub	cx, di
 .known	mov	ds, di
 	mov	es, di
 	cmp	cx, 1840h
 	jae	.enuf
-	mov	si, s_nomem
+.nenuf	mov	si, s_nomem
 	mov	bx, 7
 	mov	cx, 14
 	call	out_string
@@ -44,6 +44,79 @@ _start:
 	cld
 	mov	[saveddl], dl
 	mov	[rebootmsg], byte 0
+	mov	[maxclusters + 2], word 0
+	int	12h
+	sub	ax, 64 + 3 + 24 + 32 * 3 + 6 + 4
+	jc	.nenuf
+	; We need this much conventional memory to be able to scan any possible disk
+	; 64 KB kernel (includes unmanaged low memory) + 3KB resident shell
+	; 20 KB disk check program code + static data, 3x 32 K buffers, 6K bitbuffer cache
+	; 4K reserved in case something grows
+	; This size is barely larger than our own in the same kernel ...
+	mov	[maxclusters], ax
+	mov	ax, 0E801h
+	int	15h
+	jc	.ne801
+	cmp	ah, 86h
+	je	.ne801
+	cmp	ah, 80h
+	je	.ne801
+	cmp	cx, 64
+	jb	.finalizemaxclusters	; can't load high memory driver
+					; in theory such a PC could exist but
+					; none known and himem doesn't support it
+	sub	cx, 32			; We only benefit from about half of it
+	sub	[maxclusters], word 2	; high memory driver
+	jc	.noloadhigh		; this PC stinks
+	add	[maxclusters], cx	; Memory between 1K and 16K
+	adc	[maxclusters + 2], byte 0
+	jmp	.ishigh
+.ishigh	xchg	ax, dx	; it's fine if we get here with dx 0; check bypasses the sub
+	mov	bx, 64
+	mul	bx
+	add	[maxclusters], ax
+	adc	[maxclusters + 2], dx	; cannot overflow
+	jmp	.finalizemaxclusters
+.ne801	clc
+	mov	ah, 88h
+	int	15h
+	jc	.finalizemaxclusters
+	cmp	ax, 64
+	jb	.finalizemaxclusters
+	sub	[maxclusters], word 2	; high memory driver
+	jc	.noloadhigh		; this PC stinks
+	sub	cx, 32
+	add	[maxclusters], cx
+	adc	[maxclusters + 2], byte 0
+	jmp	.finalizemaxclusters
+.noloadhigh:
+	add	[maxclusters], word 2
+.finalizemaxclusters:
+	mov	bx, 4096
+	mov	ax, [maxclusters]
+	mul	bx
+	mov	[maxclusters], ax
+	xchg	[maxclusters + 2], ax
+	mul	bx
+	test	dx, dx
+	jnz	.clampmaxclusters
+	add	[maxclusters + 2], ax
+	jc	.clampmaxclusters	; bet it can
+	cmp	[maxclusters + 2], word 0FFFh
+	jb	.gotmaxclusters
+	ja	.clampmaxclusters
+	cmp	[maxclusters], word 0FFF5h
+	jb	.gotmaxclusters
+.clampmaxclusters:
+	mov	[maxclusters], word 0FFF5h
+	mov	[maxclusters + 2], word 0FFFh
+.gotmaxclusters:
+	cmp	[maxclusters], word 0
+	jne	.gotmaxclusters2
+.nenuv	jmp	.nenuf
+	cmp	[maxclusters + 2], word 0FFF8h
+	jb	.nenuv
+.gotmaxclusters2:
 
 	; Enumerate disks
 	mov	dl, 80h
@@ -567,7 +640,48 @@ mkfat16	mov	bl, al
 	jz	.next
 	jmp	mkall
 
-; New mkfat32 will live here
+mkfat32	mov	bl, al
+	mov	ax, [di + 2]
+	mul	word [di + 4]
+	mul	word [di + 6]	; CHS size in DX:AX
+	; While we do in fact check for sector size != 512 bytes, and it could be implemented here
+	; until some DOS supports it there's no point trying to actually use it. Non-512 goes to
+	; force CHS which in turn goes to BIOS will emulate 512.
+	cmp	[di], word 512
+	jne	.chs
+	cmp	[di + 12], word 0
+	jne	.lba
+	cmp	[di + 14], word 0
+	jne	.lba
+	cmp	dx, [di + 8]
+	jb	.lba
+	ja	.chs
+	cmp	ax, [di + 8]
+	jb	.lba
+.chs	mov	[disklba], byte 0
+	jmp	.go
+.lba	mov	[disklba], byte 1
+	cmp	[di + 12], word 0
+	jne	.lbabig
+	cmp	[di + 14], word 0
+	jne	.lbabig
+	mov	ax, [di + 8]
+	mov	dx, [di + 10]
+.go	test	dx, dx
+	jnz	.gobig
+	test	ah, ah
+	jnz	.gobig
+	jmp	mkfat12		; Ridiculously small disk
+.lbabig	xor	ax, ax		; Otherwise we woundn't use the last sector
+	mov	dx, ax
+.gobig	mov	[diskebr], byte 0
+	mov	bp, 0A000h
+.next	call	calcebralign
+	call	calcsizes32
+	or	[diskebr], byte 1
+	test	[diskebr], byte 2
+	jz	.next
+	;jmp	mkall
 
 mkall:
 	mov	ax, [minclustsizem]
@@ -577,7 +691,8 @@ mkall:
 	adc	dx, [si + 18]
 	add	ax, [si + 16]
 	adc	dx, [si + 18]
-	add	ax, [si + 6]
+	stc	; MBR/EBR counts 1 for progress bar no matter its size
+	adc	ax, [si + 6]
 	adc	dx, 0
 	add	si, 32
 	cmp	[si], byte 0
@@ -599,8 +714,6 @@ mkall:
 ;Calculate offset to next EBR entry
 ;On the *first call*, DX:AX is the size of the disk in 512 byte sectors
 calcebralign:
-	cmp	[oslevel], byte '5'
-	jae	.calcebralign32
 	test	[diskebr], byte 1
 	jz	.isprimary
 	mov	bx, [diskpriorebr]
@@ -609,7 +722,7 @@ calcebralign:
 	mov	[diskebroffset + 2], cx
 	add	bx, [minclustsizem]
 	adc	cx, 0
-	jmp	.calcmaxfat16
+	jmp	.calcmaxfat
 .isprimary:
 	xor	bx, bx
 	mov	[diskebroffset], bx
@@ -619,20 +732,38 @@ calcebralign:
 	mov	[usabledisksize2], ax
 	mov	[usabledisksize2 + 2], dx
 	call	getleadingsectors
+.calcmaxfat:
+	cmp	[oslevel], byte '5'
+	jb	.calcmaxfat16
+	cmp	[maxclusters + 2], word 0
+	je	.calcmaxfat16
+	mov	si, 64
+	call	maxfatsize32
+	add	bx, ax
+	adc	cx, dx
+	jc	.whole
+	jmp	.calcmaxfatmeasured
 .calcmaxfat16:
 	add	bx, 80h	; FFF6h * 20h + 100h * 2h (see 40h as loop terminator in fatsize)
-	add	cx, 20h
+	adc	cx, 20h
+	jc	.whole
+.calcmaxfatmeasured:
 	push	bx
 	push	cx
+	push	ax
+	mov	ax, [usabledisksize2]
+	or	ax, [usabledisksize2 + 2]
+	pop	ax
+	jz	.ebr				; 2TB disk; usabledisksize is 0
 	sub	bx, [usabledisksize2]
 	sbb	cx, [usabledisksize2 + 2]
-	jnc	.whole				; Doesn't fit: must be last
+	jnc	.whole2				; Doesn't fit: must be last
 	not	cx
 	neg	bx
 	adc	cx, 0
 	jnz	.ebr
 	cmp	bx, 2048
-	jb	.whole		; That partition is too small to bother with
+	jb	.whole2		; That partition is too small to bother with
 .ebr	pop	cx
 	pop	bx
 	; We have the stopping point in CX:BX; compute alignment
@@ -641,21 +772,19 @@ calcebralign:
 	mov	[diskpriorebr + 2], cx
 	sub	[usabledisksize2], bx
 	sbb	[usabledisksize2 + 2], cx
-	sub	bx, [diskebroffset]		; DOES THIS MAKE SENSE ??
+	sub	bx, [diskebroffset]
 	sbb	cx, [diskebroffset + 2]
 	mov	[usabledisksize], bx
 	mov	[usabledisksize + 2], cx
 	jmp	.finish
 	ret
-.whole	pop	cx
+.whole2	pop	cx
 	pop	bx
-	or	[diskebr], byte 2
+.whole	or	[diskebr], byte 2
 .finish	call	getleadingsectors
 	mov	ds:[bp + 8], bx
 	mov	ds:[bp + 10], cx
 	ret
-.calcebralign32:			; Just use whole disk (TODO: memory constraint)
-	jmp	.whole
 
 cylinderaligncxbx:
 	mov	ax, [di + 4]
@@ -686,18 +815,19 @@ calcsizes32:
 	call	calcsizesprep
 	jz	calcsizes16	; Clearly impossible to fit a FAT32 here; this protects the calc routine from underflow
 	mov	bx, [minclustsizem]
+	push	di
 	call	fatsize32
 	or	si, si
 	jnz	.ok32
 	cmp	cx, 0FFF6h
-	jbe	calcsizes16	; Doesn't fit
+	jae	.ok32
+	pop	di
+	jmp	calcsizes16	; Doesn't fit
 .ok32	mov	ds:[bp], byte 32
-	push	bx		; Yup calcsizesstuff takes an argument on the stack
-	push	ax
-	mov	ax, bx		; Reserved sectors = 3 clusters
-	add	bx, ax		; Could change this to 3 physical sectors (2kb minimum)
-	add	bx, ax
-	pop	ax
+	mov	[fat32spill], bx	; Ever play Freecell?
+	mov	bx, di
+	pop	di
+	push	word [fat32spill]		; Yup calcsizesstuff takes an argument on the stack
 	jmp	calcsizesstuff
 calcsizes16:			; FAT32 not permissible, FAT16 is
 	call	calcsizesprep
@@ -843,7 +973,7 @@ applyentry:
 	add	cx, ds:[bp + 2]
 	adc	si, 0
 	call	writeemptyfat
-	jc	.error
+	jc	short .error
 	mov	si, bp
 	push	word [si + 10]
 	push	word [si + 8]
@@ -866,7 +996,7 @@ applyentry:
 .osm2	xor	bx, bx
 	mov	dl, [disk]
 	call	lineardiskop
-	jc	.error
+	jc	short .error
 	call	progressal_base
 	mov	ax, [minclustsizem]	; Zero rest of physical cluster if FAT superblock
 	dec	ax			; is located at the end of the physical cluster
@@ -878,6 +1008,8 @@ applyentry:
 	mov	bx, 204h
 	mov	ah, 3
 	call	lineardiskop
+	jc	short .error_vector
+	call	progressal_base
 .nbfill	mov	bl, [ds:bp + 1]
 	call	patchsuperblockmbr
 	mov	cx, [ds:bp + 24]
@@ -892,7 +1024,8 @@ applyentry:
 .mbr	mov	ah, 3
 	xor	bx, bx
 	call	lineardiskop
-	jc	.error
+	jc	short .error_vector
+	mov	al, 1
 	call	progressal_base
 	mov	[rebootmsg], byte 1
 	test	[diskebr], byte 1		; CF = 0
@@ -900,11 +1033,38 @@ applyentry:
 	call	writebootcheck
 .ebrnc	pop	es
 	ret
+.error_vector:
+	jmp	.error
 .mkfat32fs:
-	ret					; $$$ TODO $$$$
+	mov	cx, [ds:bp + 8]
+	mov	si, [ds:bp + 10]
+	add	cx, [ds:bp + 2]
+	adc	si, 0
+	mov	bx, [ds:bp + 4]
+	mov	ax, [ds:bp + 16]
+	mov	dx, [ds:bp + 18]
+	call	writeemptyfat32
+	jc	short	.error_vector
 
+	mov	ax, [ds:bp + 16]
+	mov	dx, [ds:bp + 18]
+	mov	cx, [ds:bp + 20]
+	mov	si, [ds:bp + 22]
+	push	bp
+	mov	bp, [ds:bp + 4]
+	mov	es, [blockseg]
+	call	gensuperblock32
+	pop	bp
+	mov	cx, [ds:bp + 20]
+	mov	si, [ds:bp + 22]
+	mov	ah, 3
+	mov	al, [ds:bp + 2]			; 32 * 3 < 128
+	call	lineardiskop
+	jc	short	.error_vector
+	call	progressal_base
+	jmp	.nbfill
 
-mkfat32:
+mkfat32_old:
 	cmp	[di], word 512
 	jne	.chs
 	mov	ax, [di + 2]
@@ -943,7 +1103,9 @@ mkfat32:
 	sub	ax, bx
 	sbb	dx, cx
 	mov	bx, [minclustsizem]
+	mov	[fat32spill], di
 	call	fatsize32
+	xchg	di, [fat32spill]
 	or	si, si
 	jnz	.afat32
 	cmp	cx, 0FFF5h	; MS OSes use a < here
@@ -976,24 +1138,23 @@ mkfat32:
 	;Write filesystem to disk
 	push	si
 	push	cx
-	push	bx
 	push	dx
 	push	ax
-	mov	cx, bx	; Reserve slots for backup boot sectors and fs info sector
-	add	cx, bx
-	add	cx, bx
-	call	getleadingsectors
 	push	bx
-	mov	si, cx
+	call	getleadingsectors
 	xchg	bx, cx
-	add	cx, bx
+	mov	si, bx
+	add	bx, [fat32spill]	; number of leading clusters
 	adc	si, 0
+	pop	bx			; number of sectors per cluster
+	push	bx
+	push	word [fat32spill]	; save number of leading sectors
 	call	writeemptyfat32
 	jc	.error6
 	pop	bp
+	pop	bx
 	pop	ax
 	pop	dx
-	pop	bx
 	pop	cx
 	pop	si
 	mov	es, [blockseg]
@@ -1152,62 +1313,133 @@ fatsize:
 	pop	bp
 	ret
 
+; Calculate maximum number of sectors usable by FAT32 given this cluster size
+; Input: SI = number of sectors per cluster
+; Output: DX:AX = number of sectors that could be used
+; Preserves: BX, CX, DI, BP
+maxfatsize32:
+	mov	ax, [maxclusters]
+	mov	dx, [maxclusters + 2]
+.clusterloop:
+	shl	ax, 1
+	rcl	dx, 1
+	jc	.whole
+	dec	si
+	jnz	.clusterloop
+	push	dx
+	push	ax
+	mov	ax, [maxclusters]
+	mov	dx, [maxclusters + 2]
+	add	ax, 129
+	adc	dx, 0
+	shr	dx, 1
+	rcr	ax, 1
+	shr	dx, 1
+	rcr	ax, 1
+	mov	si, [minclustsizem]
+	dec	si
+	test	ax, si
+	jnz	.maxfat32a
+	add	ax, si
+	adc	dx, 0
+.maxfat32a:
+	shl	ax, 1	; two FATs
+	rcl	dx, 1
+	pop	si
+	add	ax, si
+	pop	si
+	adc	dx, di
+	jc	.whole
+	mov	si, [minclustsizem]
+	cmp	si, 4
+	jnz	.calcmaxfat32x
+	mov	si, 4
+.calcmaxfat32x:
+	add	ax, si
+	adc	dx, 0
+	jc	.whole
+	add	ax, si
+	adc	dx, 0
+	jc	.whole
+	add	ax, si
+	adc	dx, 0
+	jc	.whole
+	ret
+.whole	mov	ax, 0FFFFh
+	mov	dx, 0FFFFh
+	ret
+
 ;Input: Number of secters in partition in DX:AX, sectors per cluster in BX
-;Output: Number of sectors in FAT in DX:AX, number of clusters in SI:CX, actual sectors per cluster in BX
-;Preserves DI, BP
+;Output: Number of sectors in FAT in DX:AX, number of clusters in SI:CX, actual sectors per cluster in BX, reserved clusters in DI
+;Preserves BP
 fatsize32:
 	push	bp
 
-	test	dx, 8000h	; 1TB FAT32 needs 8kb clusters
-	jz	.szc2
-	cmp	bx, 16
-	jae	.szok
-	mov	bx, 16
-
-.szc2	cmp	bx, 8	; Don't make FAT32 with less than 4KB clusters.
-	jae	.szok
-	mov	bx, 8
-.szok:
-	;Convert 512 byte sectors to clusters
-	xchg	ax, bp
-	xchg	ax, dx
-	xor	dx, dx
-	div	bx
-	xchg	ax, bp
-	div	bx
-	or	dx, dx
-	mov	dx, bp
-	jz	.nodummy
-	sub	ax, 1
+	mov	si, [minclustsizem]
+	cmp	si, 4
+	jb	.notm1
+	mov	si, 4
+.notm1	mov	di, si
+	add	di, si
+	add	di, si		; DI = number of reserved sectors
+	sub	ax, cx
 	sbb	dx, 0
-.nodummy:
-	
-	; Boot sector region is 3 clusters in size
-	sub	ax, 3
-	sbb	dx, 0
-
-	; Always fits because bx is <= 32
-	mov	bp, bx
-	mov	cl, 7
-	shl	bx, cl		; Number of clusters addressed per sector
-	mov	cx, 1
-	call	fatsizexcomp
-	xchg	ax, cx
-	xchg	dx, si
-	mov	bx, bp
-
-	; Fat size is in physical sectors, convert to logical
+	jc	.no
 	push	di
-	mov	di, dx
-	mul	bx
-	push	ax
-	xchg	ax, dx
-	mul	bx
-	xchg	ax, dx
-	add	dx, di
-	pop	ax
+	jmp	.mmr
+.no	xor	si, si
+	xor	cx, cx
+	pop	bp
+	ret
+.clamp	mov	si, 64
+	call	maxfatsize32
+	mov	di, 64
+.mmr	mov	bx, ax
+	mov	cx, dx
+	mov	di, [minclustsizem]
+	cmp	di, 8
+	jb	.notm2
+	mov	di, 8		; Not making FAT32 with less than 4KB / sector
+.notm2	shr	di, 1
+.mcs	cmp	di, 64
+	je	.clamp
+	shl	di, 1
+	mov	si, di
+	call	maxfatsize32
+	cmp	dx, cx
+	ja	.ucs
+	jb	.mcs
+	cmp	ax, bx
+	jb	.mcs
+.ucs:	mov	ax, bx
+	mov	dx, cx
+	mov	si, [minclustsizem]
+	mov	bx, 128
+	jmp	.phys
+.physl	shr	dx, 1
+	rcr	ax, 1
+	shl	bx, 1
+	shr	di, 1
+.phys	shr	si, 1
+	jnz	.physl
+	mov	cx, di
+	call	fatsizexcomp
+	push	ax		 ; FAT size is in physical sectors, convert to logical
+	push	dx
+	xor	dx, dx
+	mov	ax, cx
+	mul	word [minclustsizem]
+	mov	cx, ax
+	mov	ax, si
+	mov	bx, dx
+	mul	word [minclustsizem]	; Cannot overflow
+	mov	dx, ax
+	add	dx, bx
+	mov	ax, cx
+	pop	si
+	pop	cx
+	mov	bx, di
 	pop	di
-
 	pop	bp
 	ret
 
@@ -1419,8 +1651,9 @@ gensuperblock16:
 
 ;DX:AX = number of sectors in FAT
 ;SI:CX = number of clusters
+;BP = number of reserved sectors (!)
 ;BX = number of sectors per cluster, ES:0 = output area
-;preserves BP, DI, BX
+;preserves DI, BX, BP
 gensuperblock32:
 	push	di
 	push	bp
@@ -1443,8 +1676,7 @@ gensuperblock32:
 	stosw
 	mov	ax, bx		; Sectors per cluster (1 byte)
 	stosb
-	add	ax, bx
-	add	ax, bx
+	mov	ax, [bp]
 	stosw			; Reserved logical sectors
 	mov	al, 2		; Number of fats
 	stosb
@@ -1455,14 +1687,14 @@ gensuperblock32:
 	stosb
 	xor	ax, ax		; Old logical sectors per file allocation table
 	stosw
-	mov	si, [bp + 2]	; Number of sectors per cluster
+	mov	si, [bp + 2]	; Number of sectors per track
 	mov	ax, [si + 2]
 	stosw
 	mov	ax, [si + 4]	; Number of heads
 	stosw
 	push	bx		; Number of sectors before start of partition
 	call	getleadingsectors
-	mov	ax, bx
+	xchg	ax, bx
 	pop	bx
 	stosw
 	xchg	ax, cx
@@ -1473,7 +1705,7 @@ gensuperblock32:
 	adc	dx, 0
 	add	ax, [bp - 4]
 	adc	dx, 0
-	add	ax, [es:0Eh]
+	add	ax, [bp]
 	adc	dx, 0
 	stosw
 	mov	[bp - 10], dx
@@ -1494,10 +1726,14 @@ gensuperblock32:
 	stosw
 	xor	ax, ax
 	stosw
-	mov	ax, bx		; FS Information sector location
-	add	ax, bx
+	mov	cx, [minclustsizem]
+	cmp	cx, 4
+	jae	.sm
+	mov	cx, 4
+.sm	mov	ax, cx		; FS Information sector location
+	add	ax, cx
 	stosw
-	sub	ax, bx		; Backup boot sector location
+	sub	ax, cx		; Backup boot sector location
 	stosw
 	xor	ax, ax		; 12 bytes reserved
 	mov	cx, 6
@@ -1539,7 +1775,10 @@ gensuperblock32:
 	xor	dx, dx
 	mov	ax, 32		; Number of free clusters (total - root)
 	div	bx
-	xchg	ax, si
+	test	dx, dx
+	jnz	.nov
+	inc	ax		; 64 sectors per cluster
+.nov	xchg	ax, si
 	mov	ax, [bp - 8]
 	sub	ax, si
 	stosw
@@ -1974,15 +2213,15 @@ writeemptyfat32:
 	mov	cx, 32		; Allocate the root directory
 	push	si
 	mov	si, 2
-.next	cmp	cx, bx
+	cmp	cx, bx
 	jbe	.last
-	inc	si
+.next	inc	si
 	mov	ax, si
 	stosw
 	xor	ax, ax
 	stosw
 	sub	cx, bx
-	jmp	.next
+	ja	.next
 .last	mov	ax, 0FFF8h
 	stosw
 	mov	ax, 00FFFh
@@ -1990,6 +2229,7 @@ writeemptyfat32:
 	pop	si
 	pop	di
 	pop	cx
+	mov	[fat32spill], bl
 	call	.writeafat
 	jc	.out
 	call	.writeafat
@@ -2000,6 +2240,13 @@ writeemptyfat32:
 	call	lineardiskop
 	jc	.out
 	call	progressal_base
+	mov	al, 64
+	cmp	al, [fat32spill]
+	jnc	.out
+	add	cx, 20h		; If cluster is 64 sectors (rare)
+	adc	si, 0		; finish zeroing root directory
+	mov	ax, 0320h	; progress bar didn't account for it
+	call	lineardiskop
 .out	pop	es
 	pop	bp
 	ret
@@ -3392,6 +3639,8 @@ diskebroffset	equ	bss + 84	; Size = 4 bytes
 diskpriorebr	equ	bss + 88	; Size = 4 bytes
 usabledisksize	equ	bss + 92	; Size = 4 bytes, amount usable for this paritition
 usabledisksize2	equ	bss + 96	; Size = 4 bytes, amount usable after this partition
+maxclusters	equ	bss + 100	; Size = 4 bytes, maximum number of clusters permitted by RAM (disk check)
+fat32spill	equ	bss + 104	; Size is currently 2 bytes
 
 disktable	equ	09000h
 ;[disktable] = bytes per sector
