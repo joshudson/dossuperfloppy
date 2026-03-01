@@ -1,7 +1,5 @@
 ; Copyright Joshua Hudson 2022-26
 
-; Next up: FAT32 part of rebuild
-
 BITS 16
 CPU 8086
 
@@ -628,7 +626,6 @@ mkfat16	mov	bl, al
 	jz	.oksiz
 	xor	ax, ax
 	mov	dx, 1
-	mov	ax, 0FFFFh
 .oksiz	mov	bp, 0A000h
 	mov	[diskebr], byte 0
 	cmp	bl, '2'		; MS-DOS this old doesn't know about EBR
@@ -744,22 +741,22 @@ calcebralign:
 	jc	.whole
 	jmp	.calcmaxfatmeasured
 .calcmaxfat16:
-	add	bx, 80h	; FFF6h * 20h + 100h * 2h (see 40h as loop terminator in fatsize)
+	; We don't need to worry about superblock, ebr, etc; the 2048 below takes care of it.
+	add	bx, 0C0h	; FFF6h * 20h + 100h * 2h (see 40h as loop terminator in fatsize)
 	adc	cx, 20h
-	jc	.whole
+	jc	.whole		; Since BX:CX was the offset into the disk, overflow is very unlikely
 .calcmaxfatmeasured:
 	push	bx
 	push	cx
-	push	ax
 	mov	ax, [usabledisksize2]
 	or	ax, [usabledisksize2 + 2]
-	pop	ax
-	jz	.ebr				; 2TB disk; usabledisksize is 0
+	jz	.tb2				; 2TB disk; usabledisksize is 0
 	sub	bx, [usabledisksize2]
 	sbb	cx, [usabledisksize2 + 2]
-	jnc	.whole2				; Doesn't fit: must be last
-	not	cx
-	neg	bx
+	jnc	.wholex				; Doesn't fit: must be last
+.tb2	not	cx
+	not	bx
+	add	bx, 1
 	adc	cx, 0
 	jnz	.ebr
 	cmp	bx, 2048
@@ -770,18 +767,20 @@ calcebralign:
 	call	cylinderaligncxbx
 	mov	[diskpriorebr], bx
 	mov	[diskpriorebr + 2], cx
-	sub	[usabledisksize2], bx
-	sbb	[usabledisksize2 + 2], cx
-	sub	bx, [diskebroffset]
-	sbb	cx, [diskebroffset + 2]
-	mov	[usabledisksize], bx
-	mov	[usabledisksize + 2], cx
 	jmp	.finish
-	ret
+.wholex	mov	ax, [usabledisksize2]
+	mov	dx, [usabledisksize2 + 2]
+	call	debug_dumpregs
 .whole2	pop	cx
 	pop	bx
 .whole	or	[diskebr], byte 2
-.finish	call	getleadingsectors
+	mov	bx, [usabledisksize2]
+	mov	cx, [usabledisksize2 + 2]
+.finish	sub	bx, [diskebroffset]
+	sbb	cx, [diskebroffset + 2]
+	mov	[usabledisksize], bx
+	mov	[usabledisksize + 2], cx
+	call	getleadingsectors
 	mov	ds:[bp + 8], bx
 	mov	ds:[bp + 10], cx
 	ret
@@ -833,7 +832,7 @@ calcsizes16:			; FAT32 not permissible, FAT16 is
 	call	calcsizesprep
 	call	reservedsectorsadj
 	or	dx, dx
-	jz	.ok16p
+	jnz	.ok16p
 	test	ah, 80h		; According to the documentation this must be a FAT12 or some DOS is unhappy
 	jz	calcsizes12
 .ok16p	mov	bx, [minclustsizem]
@@ -945,6 +944,10 @@ applyentry:
 	jne	.ebr
 	and	[diskebr], byte 0FEh
 .ebr	mov	si, bp
+	mov	ax, [si + 32 + 24]
+	mov	dx, [si + 32 + 26]
+	mov	[diskpriorebr], ax
+	mov	[diskpriorebr + 2], dx
 	mov	ax, [si + 24]
 	mov	dx, [si + 26]
 	mov	[diskebroffset], ax
@@ -1045,6 +1048,7 @@ applyentry:
 	mov	dx, [ds:bp + 18]
 	call	writeemptyfat32
 	jc	short	.error_vector
+	jmp	exit
 
 	mov	ax, [ds:bp + 16]
 	mov	dx, [ds:bp + 18]
@@ -1055,10 +1059,12 @@ applyentry:
 	mov	es, [blockseg]
 	call	gensuperblock32
 	pop	bp
-	mov	cx, [ds:bp + 20]
-	mov	si, [ds:bp + 22]
+	mov	cx, [ds:bp + 8]
+	mov	si, [ds:bp + 10]
 	mov	ah, 3
 	mov	al, [ds:bp + 2]			; 32 * 3 < 128
+	xor	bx, bx
+	mov	dl, [disk]
 	call	lineardiskop
 	jc	short	.error_vector
 	call	progressal_base
@@ -1966,14 +1972,9 @@ patchsuperblockmbr:
 	dec	bp			; Get linear address of last sector
 	add	ax, bp
 	adc	dx, 0
-	sub	ax, bp
 	call	lineartochsoroverflow	; Get CHS address of last sector
 	mov	[es:1BEh + 5], dh
 	mov	[es:1BEh + 6], cx
-	xor	cx, cx		; We wrote last sector above
-	stc			; but we want number of sectors
-	adc	[es:1BEh + 12], cx
-	adc	[es:1BEh + 14], cx
 	; Write MBR pointer to boot check
 	xor	si, si
 	mov	cx, [minclustsizem]
@@ -1989,11 +1990,10 @@ patchsuperblockmbr:
 	mov	[es:1CEh + 0], dx
 	mov	[es:1CEh + 2], cx
 	xor	si, si
-	mov	cx, [minclustsizem]
-	add	cx, 4
-	mov	[es:1CEh + 12], cx
+	mov	[es:1CEh + 12], word 4
 	mov	[es:1CEh + 14], si
-	dec	cx
+	mov	cx, [minclustsizem]
+	add	cx, 3
 	call	lineartochs
 	mov	[es:1CEh + 5], dh
 	mov	[es:1CEh + 6], cx
@@ -2042,8 +2042,8 @@ patchsuperblockmbr:
 	mov	dx, [es:1BEh + 10]
 	add	ax, [es:1BEh + 12]
 	adc	dx, [es:1BEh + 14]
-	add	ax, 1
-	adc	dx, 0
+	sub	ax, 1
+	sbb	dx, 0
 	call	lineartochsoroverflow
 	mov	[es:1BEh + 5], dh
 	mov	[es:1BEh + 6], cx
@@ -2051,8 +2051,8 @@ patchsuperblockmbr:
 	jnz	.nxnebr
 	mov	ax, [diskpriorebr]	; We iterate backwards so this is the *next* entry
 	mov	dx, [diskpriorebr + 2]
-	sub	ax, [diskebroffset]
-	sbb	dx, [diskebroffset + 2]
+	sub	ax, [0A000h + 24]
+	sbb	dx, [0A000h + 26]
 	mov	[es:1EEh + 8], ax
 	mov	[es:1EEh + 10], dx
 	call	lineartochsoroverflow
@@ -2063,13 +2063,15 @@ patchsuperblockmbr:
 	mov	cx, [di + 12]
 	or	cx, [di + 14]
 	jz	.ismbrsized
-	mov	ax, 0FFFFh
-	mov	dx, 0FFFFh
+	xor	ax, ax
+	xor	dx, dx
 .ismbrsized:
 	sub	ax, [diskebroffset]
 	sbb	dx, [diskebroffset + 2]
 	push	ax
 	push	dx
+	sub	ax, 1
+	sbb	dx, 0
 	call	lineartochsoroverflow
 	mov	dl, 05h
 	test	[disklba], byte 1
@@ -2101,6 +2103,8 @@ patchsuperblockmbr:
 	; Outputs CX, DH = CHS address, preserves BX, SI, DI, BP
 	; Special routine for computing MBR offsets because these are CHS when possible, linear when not
 lineartochsoroverflow:
+	cmp	dx, [di + 2]
+	jae	.overflow
 	push	ax
 	xchg	ax, dx
 	xor	dx, dx
@@ -2109,7 +2113,7 @@ lineartochsoroverflow:
 	pop	ax
 	div	word [di + 2]
 	xchg	cx, dx
-	inc	cl		; Sectors
+	inc	cx		; Sectors
 	cmp	dx, [di + 4]
 	jae	.overflow
 	div	word [di + 4]
@@ -2237,6 +2241,7 @@ writeemptyfat32:
 	mov	ax, 0320h	; Zero the root directory
 	mov	bx, 0200h
 	mov	dl, [disk]
+	call	debug_dumpregs
 	call	lineardiskop
 	jc	.out
 	call	progressal_base
@@ -2372,7 +2377,7 @@ getdiskstructure:
 ;Clobbers AH,DH
 lineardiskop:
 	cmp	[disklba], byte 0
-	je	.chs
+	;je	.chs;$$$$$
 	add	ah, 40h
 	push	si
 	push	di
@@ -2848,7 +2853,9 @@ bc_disksect	equ	0632h
 bc_diskhead	equ	0634h
 bc_diskcyl	equ	0636h
 bc_disklen	equ	0638h	; Stores CHS length
-bc_uselba	equ	0640h
+bc_offset2low	equ	0640h
+bc_offset2high	equ	0642h
+bc_uselba	equ	0644h
 	mov	ax, 840h
 	mov	es, ax		; ES = work segment
 	mov	[bc_saveddl], dl
@@ -2859,10 +2866,7 @@ bc_uselba	equ	0640h
 .break	mov	dl, [bc_saveddl]
 	push	ds
 	pop	es		; Set ES back to 0 to not confuse reentry point
-	xor	ax, ax
-	push	ax
-	push	bp
-	retf			; jmp 0:bp
+	jmp	bp
 .cont	mov	[bc_uselba], byte 0
 	cmp	al, 07Fh
 	jne	.fixed
@@ -3147,6 +3151,8 @@ bootcheckdescend:
 	xor	bx, bx
 	mov	[bc_offsetlow], bx
 	mov	[bc_offsethigh], bx
+	mov	[bc_offset2low], bx
+	mov	[bc_offset2high], bx
 	push	bp
 	mov	bp, ax
 	call	.reentr
@@ -3175,23 +3181,43 @@ bootcheckdescend:
 	cmp	al, 0Eh
 	je	.lbafat
 	cmp	al, 5
-	je	.mbr
+	je	.ebr
 	cmp	al, 0Fh
-	je	.lbambr
+	je	.lbaebr
 .nxt	pop	bx
 	mov	[bc_uselba], bl
 	add	si, 10h
 	cmp	si, 01FEh
 	jb	.loop
 .error	ret		; CF is cleared by cmp above
-.lbambr	or	[bc_uselba], byte 1
-.mbr	mov	ax, bootcheckdescend.reentr
-	call	bootcheckfixcodeptr
-	xchg	ax, cx
-	jmp	.act
+.lbaebr	or	[bc_uselba], byte 1
+.ebr	mov	ax, [bc_offset2low]
+	mov	dx, [bc_offset2high]
+	or	ax, ax
+	jnz	.nebr
+	or	dx, dx
+	jnz	.nebr
+	mov	ax, es:[si + 8]
+	mov	dx, es:[si + 10]
+	mov	[bc_offset2low], ax
+	mov	[bc_offset2high], dx
+	mov	[bc_offsetlow], ax
+	mov	[bc_offsethigh], dx
+.ebrcm	push	si
+	call	.reentr
+	mov	si, 0		; Don't disturb CF here
+	mov	[bc_offset2low], si
+	mov	[bc_offset2high], si
+	jmp	.pstact
+.nebr	mov	ax, es:[si + 8]
+	mov	dx, es:[si + 10]
+	add	ax, [bc_offset2low]
+	adc	dx, [bc_offset2high]
+	mov	[bc_offsetlow], ax
+	mov	[bc_offsethigh], dx
+	jmp	.ebrcm
 .lbafat or	[bc_uselba], byte 1
-.fat	mov	cx, bp
-.act	push	si
+.fat	push	si
 	mov	ax, [bc_offsetlow]
 	mov	dx, [bc_offsethigh]
 	push	ax
@@ -3205,17 +3231,18 @@ bootcheckdescend:
 	add	ax, 20h
 	mov	es, ax
 	push	bp
-	call	cx
+	call	bp
 	pop	bp
 	pop	es
 	pop	dx
 	pop	cx	; Can't use AX it must survive on error path
 	mov	[bc_offsetlow], cx
 	mov	[bc_offsethigh], dx
-	pop	si
-	jnc	.nxt
-	pop	bx
-	jmp	.error
+.pstact	pop	si
+	jc	.error2
+	jmp	.nxt
+.error2	pop	bx	; from .loop
+	ret
 
 bootcheckfixcodeptr:		; This routine is not a compile time constant from its input
 	;AX = code pointer in base	trashes BX
@@ -3552,7 +3579,7 @@ s_rebootmsg	db	'Reboot DOS to reread partition table', 13, 10, '$'
 align	4, db 0
 
 ;DEBUG
-%if 0
+%if 1
 debug_dumpregs:
 	push	sp
 	push	bp
@@ -3593,7 +3620,7 @@ debug_dumpregs:
 	add	di, 4
 	pop	cx
 	loop	.outer
-	mov	dx, 1705h
+	mov	dx, 1605h
 	mov	bx, 7
 	mov	cx, 63
 	mov	si, .dumpstr
@@ -3638,7 +3665,7 @@ diskebralign	equ	bss + 82	; unused, retained for alginment
 diskebroffset	equ	bss + 84	; Size = 4 bytes
 diskpriorebr	equ	bss + 88	; Size = 4 bytes
 usabledisksize	equ	bss + 92	; Size = 4 bytes, amount usable for this paritition
-usabledisksize2	equ	bss + 96	; Size = 4 bytes, amount usable after this partition
+usabledisksize2	equ	bss + 96	; Size = 4 bytes, amount usable for the entire disk
 maxclusters	equ	bss + 100	; Size = 4 bytes, maximum number of clusters permitted by RAM (disk check)
 fat32spill	equ	bss + 104	; Size is currently 2 bytes
 
