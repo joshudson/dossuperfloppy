@@ -681,7 +681,8 @@ mkfat32	mov	bl, al
 	;jmp	mkall
 
 mkall:
-	mov	ax, [minclustsizem]
+	mov	[0A040h], byte 0
+	xor	ax, ax
 	xor	dx, dx
 	mov	si, 0A000h
 .scan	add	ax, [si + 16]
@@ -770,7 +771,6 @@ calcebralign:
 	jmp	.finish
 .wholex	mov	ax, [usabledisksize2]
 	mov	dx, [usabledisksize2 + 2]
-	call	debug_dumpregs
 .whole2	pop	cx
 	pop	bx
 .whole	or	[diskebr], byte 2
@@ -1012,7 +1012,8 @@ applyentry:
 	mov	ah, 3
 	call	lineardiskop
 	jc	short .error_vector
-	call	progressal_base
+	;looks like it should be progress measured but should not be, actually accounting for it is hard
+	;call	progressal_base
 .nbfill	mov	bl, [ds:bp + 1]
 	call	patchsuperblockmbr
 	mov	cx, [ds:bp + 24]
@@ -2004,10 +2005,8 @@ patchsuperblockmbr:
 	mov	dx, [es:1Eh]
 	push	ax
 	push	dx
-	mov	cx, [es:20h]	; Save length of partition in sectors
-	push	cx
-	mov	cx, [es:22h]
-	push	cx
+	push	word [es:22h]	; Save length of partition in sectors (push bkwds)
+	push	word [es:20h]
 	cmp	ax, [diskebroffset]
 	jne	.ebrb
 	cmp	dx, [diskebroffset]
@@ -2025,21 +2024,25 @@ patchsuperblockmbr:
 .ebrgen pop	di			; Get disk table back
 	mov	[es:1FDh], byte 0
 	mov	[es:1BEh + 4], bl
-	pop	dx
+	pop	word [es:1BEh + 12]	; pop length
+	pop	word [es:1BEh + 14]
+	pop	dx			; pop offset
 	pop	ax
-	mov	[es:1BEh + 12], ax
-	mov	[es:1BEh + 14], dx
-	pop	dx
-	pop	ax
+	push	ax			; push offset
+	push	dx
 	sub	ax, [diskebroffset]
 	sbb	dx, [diskebroffset + 2]
 	mov	[es:1BEh + 8], ax
 	mov	[es:1BEh + 10], dx
+	pop	dx			; pop offset
+	pop	ax
+	push	ax			; push offset
+	push	dx
 	call	lineartochsoroverflow
 	mov	[es:1BEh + 1], dh
 	mov	[es:1BEh + 2], cx
-	mov	ax, [es:1BEh + 8]
-	mov	dx, [es:1BEh + 10]
+	pop	dx			; pop offset
+	pop	ax
 	add	ax, [es:1BEh + 12]
 	adc	dx, [es:1BEh + 14]
 	sub	ax, 1
@@ -2051,10 +2054,17 @@ patchsuperblockmbr:
 	jnz	.nxnebr
 	mov	ax, [diskpriorebr]	; We iterate backwards so this is the *next* entry
 	mov	dx, [diskpriorebr + 2]
+	push	ax
+	push	dx
+	; This calculation is insane
+	; right now it's picking up 0 because the address is wrong,
+	; but putting in the right address doesn't fix it
 	sub	ax, [0A000h + 24]
 	sbb	dx, [0A000h + 26]
 	mov	[es:1EEh + 8], ax
 	mov	[es:1EEh + 10], dx
+	pop	dx
+	pop	ax
 	call	lineartochsoroverflow
 	mov	[es:1EEh + 1], dh
 	mov	[es:1EEh + 2], cx
@@ -2066,12 +2076,11 @@ patchsuperblockmbr:
 	xor	ax, ax
 	xor	dx, dx
 .ismbrsized:
-	sub	ax, [diskebroffset]
-	sbb	dx, [diskebroffset + 2]
 	push	ax
 	push	dx
-	sub	ax, 1
-	sbb	dx, 0
+	stc
+	sbb	ax, [diskpriorebr]
+	sbb	dx, [diskpriorebr + 2]
 	call	lineartochsoroverflow
 	mov	dl, 05h
 	test	[disklba], byte 1
@@ -2081,8 +2090,10 @@ patchsuperblockmbr:
 	mov	[es:1EEh + 6], cx
 	pop	dx
 	pop	ax
-	sub	ax, [diskpriorebr]
-	sbb	dx, [diskpriorebr + 2]
+	;TODO is this right?
+	sub	ax, [diskpriorebr]	; length of extended partition
+	sbb	dx, [diskpriorebr + 2] ; is size of disk - size of partition
+	; TODO fixme this calculation is also busted -- nested extended partitions do something stupid
 	mov	[es:1EEh + 12], ax
 	mov	[es:1EEh + 14], dx
 
@@ -2103,8 +2114,7 @@ patchsuperblockmbr:
 	; Outputs CX, DH = CHS address, preserves BX, SI, DI, BP
 	; Special routine for computing MBR offsets because these are CHS when possible, linear when not
 lineartochsoroverflow:
-	cmp	dx, [di + 2]
-	jae	.overflow
+	; Seems to be not working ...
 	push	ax
 	xchg	ax, dx
 	xor	dx, dx
@@ -2117,8 +2127,8 @@ lineartochsoroverflow:
 	cmp	dx, [di + 4]
 	jae	.overflow
 	div	word [di + 4]
-	cmp	ax, 1023
-	ja	.overflow
+	cmp	ax, [di + 6]
+	jae	.overflow
 	mov	dh, dl
 	xchg	ah, al
 	ror	al, 1
@@ -2241,7 +2251,6 @@ writeemptyfat32:
 	mov	ax, 0320h	; Zero the root directory
 	mov	bx, 0200h
 	mov	dl, [disk]
-	call	debug_dumpregs
 	call	lineardiskop
 	jc	.out
 	call	progressal_base

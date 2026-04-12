@@ -337,9 +337,13 @@ isfat:	; Checks if bx starts with a hard disk FAT boot sector
 	jne	.no
 	cmp	[bx + 0Eh], word 0	; Must be > 0 or it's not a FAT image
 	je	.no
-	cmp	[bx + 10h], byte 2	; SSD tools can't handle not two FATs
+	cmp	[bx + 10h], byte 1	; Check num fats, must 1, 2, 3; weird way of writing it because ZF
+	je	.fatc
+	cmp	[bx + 10h], byte 3
+	je	.fatc
+	cmp	[bx + 10h], byte 2
 	jne	.no
-	test	[bx + 11h], byte 15	; # root directory entries must be a multipe of 16
+.fatc	test	[bx + 11h], byte 15	; # root directory entries must be a multipe of 16
 	jnz	.no
 	cmp	[bx + 1FEh], word 0AA55h
 	jne	.no
@@ -518,10 +522,11 @@ rebuildinfo:
 	mov	dx, [bx + 22h]
 	sub	ax, [bx + 0Eh]
 	sbb	dx, bp
-	sub	ax, [fatsects]
+	mov	cl, [bx + 10h]
+	mov	ch, 0
+.flp	sub	ax, [fatsects]
 	sbb	dx, [fatsects + 2]
-	sub	ax, [fatsects]
-	sbb	dx, [fatsects + 2]
+	loop	.flp
 	mov	cl, [bx + 0Dh]
 	jmp	short	.ndecl
 .exitz	ret
