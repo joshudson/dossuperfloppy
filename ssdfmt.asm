@@ -220,15 +220,24 @@ nextdisk:
 	mul	bx
 	add	[di + 14], ax
 	adc	dx, 0
-	or	dx, dx
+	jnz	.ovflo
+	mov	[si], ax
+	mov	ax, [si + 16h]
+	mul	bx
+	add	[di + 14], ax
+	adc	dx, 0
 	jz	.novflo
 	; Disk is too big; just say max size
-	mov	ax, 0FFFFh
+.ovflo	mov	ax, 0FFFFh
 	mov	[di + 8], ax
 	mov	[di + 10], ax
 	mov	[di + 12], ax
 	mov	[di + 14], ax
 .novflo	pop	dx
+	mov	ax, [di + 8]
+	mov	dx, [di + 10]
+	mov	bx, [di + 12]
+	mov	cx, [di + 14]
 .nolba	inc	dx
 	jmp	nextdisk
 
@@ -573,13 +582,11 @@ havedisk:
 	; If we got here we either have a really small disk or an OS version that crimps us to 64k sectors anyway.
 	; Fine. Make a small disk.
 mkfat12	mov	bp, 0A000h
-	mov	ax, [di + 2]
-	mul	word [di + 4]
-	mul	word [di + 6]
+	call	chsdisksize
 	mov	bx, [di + 2]
 	mov	cx, [di + 4]
 	mov	si, [di + 6]
-	or	dx, dx		; MS-DOS before 3.31 can't access disk sectors past 32 MB due to 16 bit math in disk geometry
+	or	dx, dx		; MS-DOS before 3.0 can't access disk sectors past 32 MB due to 16 bit math in disk geometry
 	jz	.n64k
 	xor	ax, ax
 	mov	dx, 1
@@ -607,10 +614,9 @@ mksmallcommon:
 
 	; Got here trying to make a FAT16; that is, anything below DOS 7.1
 mkfat16	mov	bl, al
+	call	chsdisksize	; Use CHS size in case whole isn't CHS accessible
 	mov	ax, [di + 2]	; Use CHS size in case whole isn't LBA accessible
-	mul	word [di + 4]
-	mul	word [di + 6]	; Size is in DX:AX
-	or	dx, dx
+	or	dx, dx		; Size is in DX:AX
 	jnz	.i64k
 	cmp	ah, 0
 	je	mkfat12		; Protect builder algorithm against ridiculously small inputs
@@ -622,7 +628,7 @@ mkfat16	mov	bl, al
 	mov	dx, 10h
 .n512m	cmp	bl, '2'
 	jne	.oksiz
-	or	dx, dx		; MS-DOS before 3.31 can't access disk sectors past 32 MB due to 16 bit math in disk geometry
+	or	dx, dx		; MS-DOS before 3.0 can't access disk sectors past 32 MB due to 16 bit math in disk geometry
 	jz	.oksiz
 	xor	ax, ax
 	mov	dx, 1
@@ -681,11 +687,18 @@ mkfat32	mov	bl, al
 	;jmp	mkall
 
 mkall:
-	mov	[0A040h], byte 0
 	xor	ax, ax
 	xor	dx, dx
+	xor	bx, bx
+	xor	cx, cx
 	mov	si, 0A000h
-.scan	add	ax, [si + 16]
+.scan	cmp	si, 0A020h
+	jne	.nebr1
+	mov	bx, [si + 24]
+	mov	cx, [si + 26]
+.nebr1	mov	[si + 28], bx
+	mov	[si + 30], cx
+	add	ax, [si + 16]
 	adc	dx, [si + 18]
 	add	ax, [si + 16]
 	adc	dx, [si + 18]
@@ -755,6 +768,8 @@ calcebralign:
 	sub	bx, [usabledisksize2]
 	sbb	cx, [usabledisksize2 + 2]
 	jnc	.wholex				; Doesn't fit: must be last
+	;The problem seems to be here
+	;The last partition is coming out too large; almost as though the overflow case isn't properly handled
 .tb2	not	cx
 	not	bx
 	add	bx, 1
@@ -948,6 +963,10 @@ applyentry:
 	mov	dx, [si + 32 + 26]
 	mov	[diskpriorebr], ax
 	mov	[diskpriorebr + 2], dx
+	mov	ax, [si + 28]
+	mov	dx, [si + 30]
+	mov	[ebrbasis], ax
+	mov	[ebrbasis + 2], dx
 	mov	ax, [si + 24]
 	mov	dx, [si + 26]
 	mov	[diskebroffset], ax
@@ -1224,6 +1243,23 @@ mkfat32_old:
 .error	push	ds
 	pop	es
 	jmp	diskerror
+
+chsdisksize:
+	mov	ax, [di + 2]
+	mul	word [di + 4]
+	mul	word [di + 6]	; CHS size in DX:AX
+	cmp	[di + 12], word 0
+	jne	.big
+	cmp	[di + 14], word 0
+	jne	.big
+	cmp	dx, [di + 10]
+	jb	.big
+	ja	.small
+	cmp	ax, [di + 8]
+	jbe	.big
+.small	mov	ax, [di + 8]	; Disk has LBA we can't use and is not rectangular.
+	mov	dx, [di + 10]	; Return actual size.
+.big	ret
 
 fatsize:
 	; Expects number of sectors in partition in DX:AX, starting cluster size in BX, max clusters in CX, entries per sector in SI
@@ -2056,11 +2092,8 @@ patchsuperblockmbr:
 	mov	dx, [diskpriorebr + 2]
 	push	ax
 	push	dx
-	; This calculation is insane
-	; right now it's picking up 0 because the address is wrong,
-	; but putting in the right address doesn't fix it
-	sub	ax, [0A000h + 24]
-	sbb	dx, [0A000h + 26]
+	sub	ax, [ebrbasis]
+	sbb	dx, [ebrbasis + 2]
 	mov	[es:1EEh + 8], ax
 	mov	[es:1EEh + 10], dx
 	pop	dx
@@ -2093,7 +2126,6 @@ patchsuperblockmbr:
 	;TODO is this right?
 	sub	ax, [diskpriorebr]	; length of extended partition
 	sbb	dx, [diskpriorebr + 2] ; is size of disk - size of partition
-	; TODO fixme this calculation is also busted -- nested extended partitions do something stupid
 	mov	[es:1EEh + 12], ax
 	mov	[es:1EEh + 14], dx
 
@@ -2114,7 +2146,6 @@ patchsuperblockmbr:
 	; Outputs CX, DH = CHS address, preserves BX, SI, DI, BP
 	; Special routine for computing MBR offsets because these are CHS when possible, linear when not
 lineartochsoroverflow:
-	; Seems to be not working ...
 	push	ax
 	xchg	ax, dx
 	xor	dx, dx
@@ -2357,7 +2388,7 @@ diskhaslba:
 	mov	[si], word 1Eh
 	mov	[si + 18h], word 0
 	mov	ah, 48h
-	int	13h			; LBA disabled for the moment
+	int	13h
 	jc	.nolba
 	cmp	[si + 18h], word 0
 	je	.nolbac			; BIOS clearly doesn't have the call
@@ -3676,7 +3707,8 @@ diskpriorebr	equ	bss + 88	; Size = 4 bytes
 usabledisksize	equ	bss + 92	; Size = 4 bytes, amount usable for this paritition
 usabledisksize2	equ	bss + 96	; Size = 4 bytes, amount usable for the entire disk
 maxclusters	equ	bss + 100	; Size = 4 bytes, maximum number of clusters permitted by RAM (disk check)
-fat32spill	equ	bss + 104	; Size is currently 2 bytes
+ebrbasis	equ	bss + 104	; Parameter from mkall to patchsuperblockmbr
+fat32spill	equ	bss + 108	; Size is currently 2 bytes
 
 disktable	equ	09000h
 ;[disktable] = bytes per sector
@@ -3696,3 +3728,4 @@ buildtable	equ	0A000h
 ;[buildtable + 16] = number of sectors per fat
 ;[buildtable + 20] = number of clusters
 ;[buildtable + 24] = offset of start of EBR table (0 = MBR)
+;[buildtable + 28] = basis for EBR

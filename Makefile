@@ -70,6 +70,6 @@ clean:
 		SSDFMT.TXT SSDFMT.COM SSDFIXBT.COM POSTNTFS.EXE SSDFMT.ZIP \
 		hdgeometry CMP.COM NEWIMAGE.COM ERRORLVL.COM
 
-host/sparcify32: host/sparcify32.asm host/syscalls32.inc
+host/sparsify32: host/sparsify32.asm host/syscalls32.inc
 	nasm -f bin -o host/sparcify32 -I host host/sparcify32.asm
 	chmod +x host/sparcify32
