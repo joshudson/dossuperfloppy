@@ -767,9 +767,7 @@ calcebralign:
 	jz	.tb2				; 2TB disk; usabledisksize is 0
 	sub	bx, [usabledisksize2]
 	sbb	cx, [usabledisksize2 + 2]
-	jnc	.wholex				; Doesn't fit: must be last
-	;The problem seems to be here
-	;The last partition is coming out too large; almost as though the overflow case isn't properly handled
+	jnc	.whole2				; Doesn't fit: must be last
 .tb2	not	cx
 	not	bx
 	add	bx, 1
@@ -784,8 +782,6 @@ calcebralign:
 	mov	[diskpriorebr], bx
 	mov	[diskpriorebr + 2], cx
 	jmp	.finish
-.wholex	mov	ax, [usabledisksize2]
-	mov	dx, [usabledisksize2 + 2]
 .whole2	pop	cx
 	pop	bx
 .whole	or	[diskebr], byte 2
@@ -937,17 +933,15 @@ calcsizesprep:
 	mov	ax, [usabledisksize]
 	mov	dx, [usabledisksize + 2]
 	call	getleadingsectors
+	sub	bx, [diskebroffset]
+	sub	cx, [diskebroffset + 2]
 	mov	ds:[bp + 12], ax
 	mov	ds:[bp + 14], dx
 	sub	ax, bx
 	sbb	dx, cx
 	ret
-reservedsectorsadj:
-	mov	bx, 1
-	cmp	[oslevel], byte '5'
-	jb	.one
-	mov	bl, [minclustsizem]
-.one	add	ax, bx
+reservedsectorsadj:	; fatsize wants the reserved sector included
+	add	ax, 1
 	adc	dx, 0
 	ret
 

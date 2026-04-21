@@ -42,6 +42,7 @@ _start	mov	dx, stconv
 	call	atoix
 	jmp	.nhigh
 
+	; AMI PCI BIOS
 .ne801	mov	ax, 0DA88h
 	int	15h
 	jc	.nda88
@@ -60,6 +61,7 @@ _start	mov	dx, stconv
 	call	atoix
 	jmp	.nhigh
 
+	; Phoenix BIOS
 	; int 15h, ah = 8ah
 .nda88	mov	ah, 8Ah
 	int	15h
