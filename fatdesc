@@ -42,6 +42,10 @@ Offset Size Desc
 4      1    partition type
 5      3    CHS address of last sector in partition
 8      4    LBA address of first absolute sector of partition
+            When interpreting this field in an EBR table, and the entry
+            is not itself an EBR entry, the sector of the EBR table must be
+            added to this value. However it is itself an EBR entry, the
+            sector of the outermost EBR entry must be added instead.
 C(12)  4    Number of sectors in partition
 
 Important partition types

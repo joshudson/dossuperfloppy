@@ -841,7 +841,6 @@ calcsizes32:
 	jmp	calcsizesstuff
 calcsizes16:			; FAT32 not permissible, FAT16 is
 	call	calcsizesprep
-	call	reservedsectorsadj
 	or	dx, dx
 	jnz	.ok16p
 	test	ah, 80h		; According to the documentation this must be a FAT12 or some DOS is unhappy
@@ -856,7 +855,6 @@ calcsizes16:			; FAT32 not permissible, FAT16 is
 	jmp	calcsizesstuffnot32
 calcsizes12:			; FAT16 not permissible either; codebase assumes there's no way FAT12 can't be made.
 	call	calcsizesprep
-	call	reservedsectorsadj
 	mov	bx, [minclustsizem]
 	mov	cx, 0FF4h	; Maximum number of clusters is FF4
 	mov	si, 155h
@@ -881,20 +879,19 @@ calcsizesstuff:
 	mov	[di + 4], bx	; logical sectors per cluster
 	mov	[di + 20], cx	; number of clusters
 	mov	[di + 22], si
-	mov	[di + 16], ax
+	mov	[di + 16], ax	; number of sectors per FAT
 	mov	[di + 18], dx
-	sub	cx, 2		; Number of clusters in DX:AX goes to number of sectors in AX:CX
-	sbb	si, 0
-	mov	ax, cx
+	mov	ax, cx		; Number of clusters in SI:CX goes to number of sectors in CX:AX
 	mul	bx
-	mov	cx, ax
-	xchg	ax, dx
+	xchg	ax, cx
+	xchg	ax, si
+	mov	si, dx
 	mul	bx
-	add	ax, dx
-	add	cx, [di + 20]
-	adc	ax, [di + 22]
-	add	cx, [di + 20]
-	adc	ax, [di + 22]
+	add	ax, si
+	add	cx, [di + 16]
+	adc	ax, [di + 18]
+	add	cx, [di + 16]
+	adc	ax, [di + 18]
 	mov	[di + 12], cx
 	mov	[di + 14], ax
 	mov	bx, [diskebroffset]
@@ -934,15 +931,11 @@ calcsizesprep:
 	mov	dx, [usabledisksize + 2]
 	call	getleadingsectors
 	sub	bx, [diskebroffset]
-	sub	cx, [diskebroffset + 2]
+	sbb	cx, [diskebroffset + 2]
 	mov	ds:[bp + 12], ax
 	mov	ds:[bp + 14], dx
 	sub	ax, bx
 	sbb	dx, cx
-	ret
-reservedsectorsadj:	; fatsize wants the reserved sector included
-	add	ax, 1
-	adc	dx, 0
 	ret
 
 applyentry:
@@ -1273,7 +1266,6 @@ fatsize:
 	mov	ax, si
 	mul	bx		; Cannot overflow: biggest is 40h * 155h = 9440h
 	mov	[bp - 10], ax	; number of entries per physical sector
-	mov	dx, di
 	mov	ax, [bp - 4]
 	div	bx
 	mov	[bp - 14], ax	; number of physical sectors high
@@ -1286,8 +1278,7 @@ fatsize:
 	mov	[bp - 22], di	; best number of logical data sectors low
 	mov	[bp - 24], di	; best number of physical data sectors high
 	mov	[bp - 26], di	; best number of sectors per FAT
-	mov	cx, 40h
-	mov	[bp - 28], cx	; loop terminator
+	mov	[bp - 28], word 40h	; loop terminator
 	pop	di
 
 .trysectors:
@@ -1296,20 +1287,10 @@ fatsize:
 	div	byte [bp - 6]
 	mov	cx, ax
 	mov	bx, [bp - 10]
-	mov	ax, [bp - 4]
-	xor	dx, dx		; fatsizexcomp needs number of physical sectors not logical
-	div	word [bp - 6]
-	push	ax
-	mov	ax, [bp - 2]
-	div	word [bp - 6]
-	or	dx, dx
-	pop	dx
-	jz	.xactc
-	sub	ax, 1
-	sbb	dx, 0
-.xactc	call	fatsizexcomp
+	mov	ax, [bp - 12]
+	mov	dx, [bp - 14]
+	call	fatsizexcomp
 	pop	bx
-
 	or	dx, dx
 	jnz	.vd		; Way too large
 	cmp	ax, [bp - 16]
@@ -1508,8 +1489,10 @@ fatsizexcomp:
 	mov	[bp - 8], ax
 	mov	[bp - 10], dx
 
-	;The calculation is clusters = (sectors + 2 * sectors per cluster) * entries per sector / (2 + sectors per cluster * entries per sector)
-	;but it calculates up to entries per sector too many clusters so we have to check it below.
+	; sectors = clusters * sectors per cluster + 2 * ceil(clusters / entries per cluster)
+	; Therefore, clusters is approximately sectors * entries per sector / (2 + sectors per cluster * entries per sector)
+	; The error introduced by flattening the ceil results in the denominator being too small by up to entries per sector.
+	; (in fact entries per sector divided by clusters) which means the calculation can only be correct or too large.
 
 	mov	[bp - 4], dx
 	mul	bx
@@ -1532,10 +1515,16 @@ fatsizexcomp:
 	mov	ax, [bp - 2]
 	div	cx
 	mov	[bp - 2], ax
+	test	dx, dx
+	jz	.xact
+	add	[bp - 2], word 1 ; Ceiling divide
+	adc	[bp - 4], word 0
+.xact:
 
 	;So, the problem is, this is too large by up to number of entires (BX)
 	;We have to check this and recompute down
 
+	; Get number of sectors per FAT used
 	xor	dx, dx
 	mov	ax, [bp - 4]
 	div	bx
@@ -1566,30 +1555,37 @@ fatsizexcomp:
 	add	ax, [bp - 12]
 	adc	dx, [bp - 14]
 
-	; Check for overflow
+	; Check if too large
 	sub	ax, [bp - 8]
 	sbb	dx, [bp - 10]
-	jnc	.ncr
-	not	ax
+%ifdef DEBUG
+	jnc	.notlarge	; Should not happen, code left in
+	not	ax		; in debug compilation in case of bugs
+	not	dx		; elsewhere
 	add	ax, 1
-	not	dx
 	adc	dx, 0
-	div	cx		; Cannot overflow
+	call	debug_dumpregs
+	jmp	exit
+.notlarge:
+%endif
+	jnz	.over
+	test	ax, ax
+	jz	.fits
+.over	div	cx		; Cannot overflow
 	or	dx, dx
 	jz	.noc
 	inc	ax
 	xor	dx, dx
-	;AX contains overflow in clusters, DX 0
+	; AX contains overflow in clusters, DX 0
 .noc	sub	[bp - 2], ax
 	sbb	[bp - 4], dx
-	
-.ncr	mov	ax, [bp - 2]
+.fits	mov	ax, [bp - 2]
 	mov	dx, [bp - 4]
 	mov	cx, [bp - 12]
 	mov	si, [bp - 14]
 
-	sub	ax, 2	; Take off the bogus clusters we added at start
-	sbb	dx, 0	; Cluster numbers 0 and 1 are unusable; first cluster is #2
+	sub	ax, 2		; Take off the bogus clusters we added at the start
+	sbb	dx, 0		; Cluster numbers 0 and 1 are unusable; first cluster is #2
 
 	mov	sp, bp
 	pop	bp
@@ -1618,11 +1614,13 @@ gensuperblock16:
 	adc	dx, si
 	add	ax, [bp + 8]
 	adc	dx, si
-	add	ax, [bp + 4]
+	mov	cx, [bp + 4]
+	add	cx, 32		; Number of root directory entries
+	add	ax, cx
 	adc	dx, si
 	mov	[bp - 4], dx	; [BP - 4] - total sectors high
 	mov	[bp - 6], ax	; [BP - 6] - total sectors low
-	
+
 	xor	di, di
 	mov	ax, 03CEBh	; JMP to 0x3E
 	stosw
@@ -1998,6 +1996,8 @@ patchsuperblockmbr:
 	mov	[es:1BEh + 8], bp	; First linear sector of partition
 	mov	ax, [es:20h]
 	mov	dx, [es:22h]
+	sub	ax, bp
+	sbb	dx, 0
 	mov	[es:1BEh + 12], ax	; Number of sectors in partition
 	mov	[es:1BEh + 14], dx
 	dec	bp			; Get linear address of last sector
@@ -2887,9 +2887,10 @@ bc_disksect	equ	0632h
 bc_diskhead	equ	0634h
 bc_diskcyl	equ	0636h
 bc_disklen	equ	0638h	; Stores CHS length
-bc_offset2low	equ	0640h
-bc_offset2high	equ	0642h
-bc_uselba	equ	0644h
+bc_ebrebrbasis	equ	0640h
+bc_ebrfatbasis	equ	0644h
+bc_ebrdepth	equ	0648h
+bc_uselba	equ	064Ah
 	mov	ax, 840h
 	mov	es, ax		; ES = work segment
 	mov	[bc_saveddl], dl
@@ -2901,8 +2902,7 @@ bc_uselba	equ	0644h
 	push	ds
 	pop	es		; Set ES back to 0 to not confuse reentry point
 	jmp	bp
-.cont	mov	[bc_uselba], byte 0
-	cmp	al, 07Fh
+.cont	cmp	al, 07Fh
 	jne	.fixed
 	mov	al, [bc_saveddl]
 .fixed	push	si
@@ -3185,77 +3185,51 @@ bootcheckdescend:
 	xor	bx, bx
 	mov	[bc_offsetlow], bx
 	mov	[bc_offsethigh], bx
-	mov	[bc_offset2low], bx
-	mov	[bc_offset2high], bx
+	mov	[bc_ebrfatbasis], bx
+	mov	[bc_ebrfatbasis + 2], bx
+	mov	[bc_ebrdepth], bx
+	mov	[bc_uselba], bl
 	push	bp
 	mov	bp, ax
+	mov	cx, bx
+	mov	si, bx
 	call	.reentr
 	pop	bp
 	ret
-.reentr	xor	cx, cx
-	xor	si, si
-	xor	bx, bx
+.reentr	xor	bx, bx
 	mov	ax, 0201h
-	call	bootcheckdiskoprel
+	call	bootcheckdiskop
 	jc	.error
-	mov	si, 01BEh
-.loop	mov	al, es:[si + 4]
+	mov	di, 01BEh
+.loop	mov	al, es:[di + 4]
 	mov	bl, [bc_uselba]
 	push	bx
 	cmp	al, 1
-	je	.fat
+	je	short .fat
 	cmp	al, 4
-	je	.fat
+	je	short .fat
 	cmp	al, 6
-	je	.fat
+	je	short .fat
 	cmp	al, 0Bh
-	je	.fat
+	je	short .fat
 	cmp	al, 0Ch
-	je	.lbafat
+	je	short .lbafat
 	cmp	al, 0Eh
-	je	.lbafat
+	je	short .lbafat
 	cmp	al, 5
-	je	.ebr
+	je	short .ebr
 	cmp	al, 0Fh
-	je	.lbaebr
+	je	short .lbaebr
 .nxt	pop	bx
 	mov	[bc_uselba], bl
-	add	si, 10h
-	cmp	si, 01FEh
+	add	di, 10h
+	cmp	di, 01FEh
 	jb	.loop
 .error	ret		; CF is cleared by cmp above
-.lbaebr	or	[bc_uselba], byte 1
-.ebr	mov	ax, [bc_offset2low]
-	mov	dx, [bc_offset2high]
-	or	ax, ax
-	jnz	.nebr
-	or	dx, dx
-	jnz	.nebr
-	mov	ax, es:[si + 8]
-	mov	dx, es:[si + 10]
-	mov	[bc_offset2low], ax
-	mov	[bc_offset2high], dx
-	mov	[bc_offsetlow], ax
-	mov	[bc_offsethigh], dx
-.ebrcm	push	si
-	call	.reentr
-	mov	si, 0		; Don't disturb CF here
-	mov	[bc_offset2low], si
-	mov	[bc_offset2high], si
-	jmp	.pstact
-.nebr	mov	ax, es:[si + 8]
-	mov	dx, es:[si + 10]
-	add	ax, [bc_offset2low]
-	adc	dx, [bc_offset2high]
-	mov	[bc_offsetlow], ax
-	mov	[bc_offsethigh], dx
-	jmp	.ebrcm
 .lbafat or	[bc_uselba], byte 1
-.fat	push	si
-	mov	ax, [bc_offsetlow]
-	mov	dx, [bc_offsethigh]
-	push	ax
-	push	dx
+.fat	push	di
+	mov	ax, [bc_ebrfatbasis]
+	mov	dx, [bc_ebrfatbasis + 2]
 	add	ax, es:[si + 8]
 	adc	dx, es:[si + 10]
 	mov	[bc_offsetlow], ax
@@ -3268,11 +3242,43 @@ bootcheckdescend:
 	call	bp
 	pop	bp
 	pop	es
-	pop	dx
-	pop	cx	; Can't use AX it must survive on error path
-	mov	[bc_offsetlow], cx
-	mov	[bc_offsethigh], dx
-.pstact	pop	si
+	jmp	.pstact
+.lbaebr	or	[bc_uselba], byte 1
+.ebr	push	di
+	push	si
+	push	cx
+	mov	ax, es:[di + 8]
+	mov	dx, es:[di + 10]
+	cmp	[bc_ebrdepth], word 0
+	jne	.nebr
+	mov	[bc_ebrebrbasis], ax
+	mov	[bc_ebrebrbasis + 2], dx
+	mov	cx, ax
+	mov	si, dx
+	jmp	.cebr
+.nebr	mov	cx, [bc_ebrebrbasis]
+	mov	si, [bc_ebrebrbasis + 2]
+	add	cx, ax
+	adc	si, dx
+.cebr	inc	word [bc_ebrdepth]
+	push	word [bc_ebrfatbasis]
+	push	word [bc_ebrfatbasis + 2]
+	mov	[bc_ebrfatbasis], cx
+	mov	[bc_ebrfatbasis + 2], si
+	push	es
+	mov	ax, es
+	add	ax, 20h
+	mov	es, ax
+	call	.reentr
+	pop	es
+	pop	word [bc_ebrfatbasis + 2]
+	pop	word [bc_ebrfatbasis]
+	pushf	; Don't disturb CF
+	dec	word [bc_ebrdepth]
+	popf
+	pop	cx
+	pop	si
+.pstact	pop	di
 	jc	.error2
 	jmp	.nxt
 .error2	pop	bx	; from .loop

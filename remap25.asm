@@ -22,6 +22,10 @@ heads		equ	78
 sectors		equ	80
 programstart	equ	96
 
+ebrfatbasis	equ	96
+ebrebrbasis	equ	100
+ebrdepth	equ	104
+
 _start:
 	jmp	main
 
@@ -34,7 +38,7 @@ usage:
 .message:
 	db	"REMAP25: remap access to a drive letter to a partition", 13, 10
 	db	"Only raw disk access to the drive letter should be used.", 13, 10
-	db	"Copyright (C) Joshua Hudson 2025", 13, 10
+	db	"Copyright (C) Joshua Hudson 2025-26", 13, 10
 	db	"Usage: REMAP25 [/C|/L] disk", 13, 10
 	db	"Usage: REMAP25 [/C|/L] disk partition Z: A:\SSDSCAN.COM Z: options", 13, 10, '$'
 
@@ -214,15 +218,20 @@ loadlist:
 	add	[di + 8], ax
 	adc	dx, 0
 	mov	[di + 10], dx
-.param	mov	[di], byte 0
-	mov	[di + 2], word 0
-	mov	[di + 4], word 0
+.param	xor	bx, bx
+	mov	[di], bl
+	mov	[di + 2], bx
+	mov	[di + 4], bx
 	add	di, 12
+	mov	[ebrfatbasis], bx
+	mov	[ebrfatbasis + 2], bx
+	mov	[ebrebrbasis], bx
+	mov	[ebrebrbasis + 2], bx
+	mov	[ebrdepth], bx
 
 	mov	bx, di
 	xor	ax, ax
 	xor	dx, dx
-	mov	cx, 1
 	push	di
 	call	.diskaccess
 	pop	di
@@ -237,8 +246,6 @@ loadlist:
 	rep	movsw
 	mov	di, bx
 	mov	si, sp
-	xor	ax, ax
-	xor	dx, dx
 	mov	ch, 0
 	call	.slot
 	add	si, 16
@@ -302,24 +309,42 @@ loadlist:
 .eslot	mov	[di], byte 0FFh
 	add	di, 12
 .ret	ret
-.ebr	push	si
-	push	ax
-	push	dx
+.fat	mov	ax, [ebrfatbasis]
+	mov	dx, [ebrfatbasis + 2]
 	add	ax, [si + 8]
 	adc	dx, [si + 10]
-	push	ax
-	push	dx
+	mov	[di], cl
+	mov	[di + 2], ax
+	mov	[di + 4], dx
+	mov	ax, [si + 12]
+	mov	dx, [si + 14]
+	mov	[di + 6], ax
+	mov	[di + 8], dx
+	mov	[di + 10], word 0
+	add	di, 12
+	ret
+.ebr	mov	ax, [si + 8]
+	mov	dx, [si + 10]
+	cmp	[ebrdepth], word 0
+	jne	.nebr
+	mov	[ebrebrbasis], ax
+	mov	[ebrebrbasis + 2], dx
+	jmp	.cebr
+.nebr	add	ax, [ebrebrbasis]
+	adc	dx, [ebrebrbasis + 2]
+.cebr	push	word [ebrfatbasis]
+	push	word [ebrfatbasis + 2]
+	mov	[ebrfatbasis], ax
+	mov	[ebrfatbasis + 2], dx
+	inc	word [ebrdepth]
+	push	si
 	mov	bx, di
-	push	di
 	call	.diskaccess
 	jc	.err
-	pop	bx
-	pop	dx
-	pop	ax
-	lea	si, [bx + 446]
 	push	bp
 	mov	bp, sp
 	sub	sp, 64
+	lea	si, [bx + 446]
 	mov	di, sp
 	mov	cx, 32
 	rep	movsw
@@ -338,25 +363,10 @@ loadlist:
 	call	.slot
 	mov	sp, bp
 	pop	bp
-	pop	dx
-	pop	ax
 	pop	si
-	ret
-.fat	push	ax
-	push	dx
-	add	ax, [si + 8]
-	adc	dx, [si + 10]
-	mov	[di], cl
-	mov	[di + 2], ax
-	mov	[di + 4], dx
-	mov	ax, [si + 12]
-	mov	dx, [si + 14]
-	mov	[di + 6], ax
-	mov	[di + 8], dx
-	mov	[di + 10], word 0
-	pop	dx
-	pop	ax
-	add	di, 12
+	dec	word [ebrdepth]
+	pop	word [ebrfatbasis + 2]
+	pop	word [ebrfatbasis]
 	ret
 
 .stack	mov	dx, stack
@@ -365,6 +375,7 @@ loadlist:
 	mov	ax, 4CFFh
 	int	21h
 .diskaccess:
+	mov	cx, 1
 	lea	di, [bx + 32768 + 128]
 	cmp	di, sp
 	jae	.stack
@@ -638,7 +649,7 @@ int2526common:
 	les	bx, [bx + 6]
 .com	push	cs
 	pop	ds
-	cmp	dx, [limit]
+	cmp	dx, [limit + 2]
 	jb	.lg
 	ja	.lb
 	cmp	ax, [limit]
@@ -655,6 +666,7 @@ int2526common:
 	adc	dx, [offset + 2]
 
 chsdiskaccess:
+	jc	.over
 	mov	si, cx
 	mov	di, ax
 	xchg	ax, dx
@@ -665,8 +677,12 @@ chsdiskaccess:
 	inc	dx
 	mov	cx, dx	; Sector is in place
 	mov	dx, di
+	cmp	dx, [heads]
+	jae	.over
 	div	word [heads]
 	mov	dh, dl	; Head is in place
+	cmp	ax, 1024
+	jae	.over
 	xchg	ah, al
 	ror	al, 1
 	ror	al, 1
@@ -675,6 +691,9 @@ chsdiskaccess:
 	mov	dl, [physdisk]
 	mov	ah, [ahaction]
 	int	13h
+	jmp	.end
+.over	mov	ah, 04h	; Sector not found
+	stc
 .end	ret		; Used by us
 
 lbadiskaccess:
