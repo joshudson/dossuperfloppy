@@ -115,6 +115,9 @@ _start:
 	cmp	[maxclusters + 2], word 0FFF8h
 	jb	.nenuv
 .gotmaxclusters2:
+	xor	ax, ax
+	mov	[lvolumeserial], ax
+	mov	[lvolumeserial + 2], dx
 
 	; Enumerate disks
 	mov	dl, 80h
@@ -1842,7 +1845,9 @@ volumeserial:
 	stc
 	mov	ah, 4
 	int	1Ah
-	jc	.noday
+	jnc	.day
+	xor	cx, cx			; Day not available
+	xor	dx, dx
 .day	mov	al, dl
 	call	unpackbcd
 	mov	[dap], al		;Day
@@ -1884,21 +1889,26 @@ volumeserial:
 	mov	cl, 182
 	div	cl
 	mov	[dap + 6], al		; Hundredths
-	mov	ah, [dap + 1]
-	mov	al, [dap]
+	;mov	ah, [dap + 1]
+	;mov	al, [dap]
+	mov	ax, [dap]
 	mov	dh, [dap + 5]
 	mov	dl, [dap + 6]
 	add	ax, dx
+	mov	ch, [dap + 3]
+	mov	cl, [dap + 4]
+	add	cx, [dap + 2]
+	cmp	ax, [lvolumeserial]
+	jne	.diff
+	cmp	cx, [lvolumeserial + 2]
+	jne	.diff
+	jmp	volumeserial		; Too fast, serial number duplicated
+.diff	mov	[lvolumeserial], ax
+	mov	[lvolumeserial + 2], cx
 	stosw
-	mov	ah, [dap + 3]
-	mov	al, [dap + 4]
-	mov	dx, [dap + 2]
-	add	ax, dx
+	xchg	ax, cx
 	stosw
 	ret
-.noday	xor	cx, cx
-	xor	dx, dx
-	jmp	.day
 
 unpackbcd:
 	push	cx
@@ -2117,7 +2127,6 @@ patchsuperblockmbr:
 	mov	[es:1EEh + 6], cx
 	pop	dx
 	pop	ax
-	;TODO is this right?
 	sub	ax, [diskpriorebr]	; length of extended partition
 	sbb	dx, [diskpriorebr + 2] ; is size of disk - size of partition
 	mov	[es:1EEh + 12], ax
@@ -3016,14 +3025,13 @@ bootcheckisfatandlen:
 	jne	.skip
 	mov	ax, es:[16h]
 	or	ax, ax
-	jz	.try32		; If we run out of space squeeze one byte here
-	ret
+	jnz	.ret
 .try32	mov	ax, es:[24h]
 	mov	dx, es:[26h]
 	push	ax
 	or	ax, dx
 	pop	ax
-	ret
+.ret	ret
 .skip	xor	ax, ax	; Clear ZF
 	ret
 
@@ -3230,8 +3238,8 @@ bootcheckdescend:
 .fat	push	di
 	mov	ax, [bc_ebrfatbasis]
 	mov	dx, [bc_ebrfatbasis + 2]
-	add	ax, es:[si + 8]
-	adc	dx, es:[si + 10]
+	add	ax, es:[di + 8]
+	adc	dx, es:[di + 10]
 	mov	[bc_offsetlow], ax
 	mov	[bc_offsethigh], dx
 	push	es
@@ -3273,9 +3281,7 @@ bootcheckdescend:
 	pop	es
 	pop	word [bc_ebrfatbasis + 2]
 	pop	word [bc_ebrfatbasis]
-	pushf	; Don't disturb CF
-	dec	word [bc_ebrdepth]
-	popf
+	dec	word [bc_ebrdepth]	; does not affect CF!
 	pop	cx
 	pop	si
 .pstact	pop	di
@@ -3322,10 +3328,8 @@ bootcheckdiskoprel:
 	;SI:CX remembers absolute address after call; clobbers DI, AH, DH
 	add	cx, [bc_offsetlow]
 	adc	si, [bc_offsethigh]
-	jc	.no
-	call	bootcheckdiskop
-	ret
-.no	mov	ah, 40h	; We can't handle disks > 2TB, but neither can MBR!
+	jnc	bootcheckdiskop
+	mov	ah, 40h	; We can't handle disks > 2TB
 	ret		; This catches a partition that starts within range but ends out of range
 
 bootcheckdiskop:
@@ -3708,7 +3712,8 @@ usabledisksize	equ	bss + 92	; Size = 4 bytes, amount usable for this paritition
 usabledisksize2	equ	bss + 96	; Size = 4 bytes, amount usable for the entire disk
 maxclusters	equ	bss + 100	; Size = 4 bytes, maximum number of clusters permitted by RAM (disk check)
 ebrbasis	equ	bss + 104	; Parameter from mkall to patchsuperblockmbr
-fat32spill	equ	bss + 108	; Size is currently 2 bytes
+lvolumeserial	equ	bss + 108	; Size = 4 bytes, last volume serial number generated
+fat32spill	equ	bss + 112	; Size is currently 2 bytes
 
 disktable	equ	09000h
 ;[disktable] = bytes per sector

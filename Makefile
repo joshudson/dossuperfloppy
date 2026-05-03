@@ -28,6 +28,9 @@ SSDFMT.COM: ssdfmt.asm
 SSDSCAN.COM: ssdscan.asm
 	nasm -f bin -o SSDSCAN.COM ssdscan.asm
 
+RENAME1.COM: rename1.asm
+	nasm -f bin -o RENAME1.COM rename1.asm
+
 SSDFIXBT.COM: ssdfixbt.asm
 	nasm -f bin -o SSDFIXBT.COM ssdfixbt.asm
 

@@ -1,3 +1,9 @@
+;	https://flint.cs.yale.edu/feng/cos/resources/BIOS/Resources/assembly/doserrorcodes.html
+;	Of the following error codes, only error codes 1-12 are
+;	returned in AX upon exit from interrupt 21 or 24;  The rest
+;	are obtained by issuing the "get extended error" function
+;	call;  see INT 21,59
+
 errorcodes:
 	dw	.e0
 	dw	.e1

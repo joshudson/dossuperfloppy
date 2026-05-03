@@ -127,7 +127,7 @@ Address Length Meaning
 018     2      Sectors per track
 01A     2      Number of heads
 01C     4      Hidden Sectors: Number of sectors preceeding the boot sector
--- Before DOS 3.31, the BPB ended at 01E, Hidden Sectors was  --
+-- Before DOS 3.31, the BPB ended at 01E, Hidden Sectors was 2 bytes long
 020     4      Total logical sectors
 024     1      BIOS drive number
 025     1      Reserved, set to 0 by formatting tools

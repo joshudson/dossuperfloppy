@@ -183,6 +183,15 @@ prompting. This should only occur after bad sector recovery.
 
 FAT32: The number of free clusters is corrected without prompting.
 
+Duplicate filenames are not detected. The included RENAME1 utility can be
+used to correct the situation (even from within Windows); as it knows
+nothing of wildcard expansion, it will rename only one file, and now the
+names are no longer duplicate.
+
+Filenames with spaces in them are VALID filenames and are not corrected.
+The included RENAME1 utility can be used to give them names easier to
+work with.
+
 Recover backup boot sector is currently bugged in FreeDOS. The included
 REMAP25.COM can be used to recover it anyway.  The arguments to REMAP25 are
 hard disk number (starts with 1), partition number, and program to run:
