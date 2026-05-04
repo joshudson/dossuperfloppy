@@ -30,7 +30,7 @@ _start:
 	add	di, 11h
 .known	mov	ds, di
 	mov	es, di
-	cmp	cx, 1840h
+	cmp	cx, 1C10h
 	jae	.enuf
 .nenuf	mov	si, s_nomem
 	mov	bx, 7
@@ -50,8 +50,8 @@ _start:
 	; 64 KB kernel (includes unmanaged low memory) + 3KB resident shell
 	; 20 KB disk check program code + static data, 3x 32 K buffers, 6K bitbuffer cache
 	; 4K reserved in case something grows
-	; This size is barely larger than our own in the same kernel ...
-	mov	[maxclusters], ax
+	; This size is barely larger than our own size on the same kernel.
+	mov	[maxclusters], ax	; Temporarily contains KB; will multiply below
 	mov	ax, 0E801h
 	int	15h
 	jc	.ne801
@@ -1058,14 +1058,14 @@ applyentry:
 	mov	dx, [ds:bp + 18]
 	call	writeemptyfat32
 	jc	short	.error_vector
-	jmp	exit
 
 	mov	ax, [ds:bp + 16]
 	mov	dx, [ds:bp + 18]
 	mov	cx, [ds:bp + 20]
 	mov	si, [ds:bp + 22]
+	mov	bx, [ds:bp + 4]
 	push	bp
-	mov	bp, [ds:bp + 4]
+	mov	bp, [ds:bp + 2]
 	mov	es, [blockseg]
 	call	gensuperblock32
 	pop	bp
@@ -1079,160 +1079,6 @@ applyentry:
 	jc	short	.error_vector
 	call	progressal_base
 	jmp	.nbfill
-
-mkfat32_old:
-	cmp	[di], word 512
-	jne	.chs
-	mov	ax, [di + 2]
-	mul	word [di + 4]
-	mul	word [di + 6]
-	cmp	ax, [di + 8]
-	jne	.lba
-	cmp	dx, [di + 10]
-	jne	.lba
-	xor	ax, ax
-	cmp	ax, [di + 12]
-	jne	.lba
-	cmp	ax, [di + 14]
-	je	.chs
-.lba	mov	[disklba], byte 1
-	jmp	.mkfat32
-.chs	mov	[disklba], byte 0
-.mkfat32:
-	test	[disklba], byte 1
-	je	.lbasz
-	mov	ax, [di + 2]
-	mul	word [di + 4]
-	mul	word [di + 6]
-	jmp	.hsz
-.lbasz	cmp	[di + 12], word 0
-	jne	.glbasz
-	cmp	[di + 14], word 0
-	jne	.glbasz
-	mov	ax, [di + 8]
-	mov	dx, [di + 10]
-	jmp	.hsz
-.mkf16	jmp	mkfat16
-.glbasz	mov	ax, 0FFFFh	; MBR can't handle larger
-	mov	dx, ax
-.hsz	call	getleadingsectors
-	sub	ax, bx
-	sbb	dx, cx
-	mov	bx, [minclustsizem]
-	mov	[fat32spill], di
-	call	fatsize32
-	xchg	di, [fat32spill]
-	or	si, si
-	jnz	.afat32
-	cmp	cx, 0FFF5h	; MS OSes use a < here
-	jb	.mkf16		; Too small, make a FAT16
-
-	;Get size for progress bar
-.afat32	push	ax
-	push	bx
-	push	cx
-	push	dx
-	push	si
-	mov	si, pgbar
-	add	ax, ax
-	adc	dx, dx
-	mov	cx, 1 + 32 + 4
-	add	cx, bx
-	add	cx, bx
-	add	cx, bx
-	add	ax, cx
-	adc	dx, 0
-	mov	cx, 01701h
-	mov	bx, 04F07h
-	call	initprogressbar
-	pop	si
-	pop	dx
-	pop	cx
-	pop	bx
-	pop	ax
-
-	;Write filesystem to disk
-	push	si
-	push	cx
-	push	dx
-	push	ax
-	push	bx
-	call	getleadingsectors
-	xchg	bx, cx
-	mov	si, bx
-	add	bx, [fat32spill]	; number of leading clusters
-	adc	si, 0
-	pop	bx			; number of sectors per cluster
-	push	bx
-	push	word [fat32spill]	; save number of leading sectors
-	call	writeemptyfat32
-	jc	.error6
-	pop	bp
-	pop	bx
-	pop	ax
-	pop	dx
-	pop	cx
-	pop	si
-	mov	es, [blockseg]
-	call	gensuperblock32
-	push	bx
-	mov	al, bl
-	mov	ah, 3
-	xor	si, si
-	mov	cx, bp		; number of leading sectors
-	xor	bx, bx
-	mov	dl, [disk]
-	call	lineardiskop
-	jc	.error1
-	call	progressal_base
-	pop	bx
-	add	cx, bx
-	push	bx
-	mov	al, bl
-	mov	ah, 3
-	xor	bx, bx
-	call	lineardiskop
-	jc	.error1
-	call	progressal_base
-	pop	bx
-	add	cx, bx
-	mov	al, bl
-	mov	ah, 3
-	mov	bx, [es:30h]
-	mov	bh, bl
-	mov	bl, 0
-	shl	bh, 1
-	call	lineardiskop
-	jc	.error
-	call	progressal_base
-	mov	bl, 0Bh
-	call	patchsuperblockmbr
-	xor	bx, bx
-	xor	cx, cx
-	inc	cx
-	mov	dh, 0
-	mov	dl, [disk]
-	mov	ah, 03h
-	mov	al, [minclustsizem]
-	int	13h
-	jc	short	.error
-	mov	al, 1
-	call	progressal_base
-	mov	[rebootmsg], byte 1
-	call	writebootcheck
-	jc	short	.error
-	mov	al, 4
-	call	progressal_base
-	push	ds
-	pop	es
-	jmp	afterfat
-
-.error6	sub	sp, 2
-.error5	sub	sp, 8
-.error1	sub	sp, 2
-.error	push	ds
-	pop	es
-	jmp	diskerror
 
 chsdisksize:
 	mov	ax, [di + 2]
@@ -1398,7 +1244,7 @@ fatsize32:
 
 	mov	si, [minclustsizem]
 	cmp	si, 4
-	jb	.notm1
+	jae	.notm1
 	mov	si, 4
 .notm1	mov	di, si
 	add	di, si
@@ -1794,6 +1640,14 @@ gensuperblock32:
 	stosw
 	mov	ax, '85'
 	stosw
+
+	;Copy boot sector to backup boot sector
+	xor	si, si
+	mov	di, [es:32h]
+	mov	cl, 9
+	shl	di, cl
+	mov	cx, 256
+	rep	movsw
 
 	;Now generate info sector
 	mov	di, [es:30h]
@@ -2247,7 +2101,7 @@ writeemptyfat32:
 	push	di
 	xor	ax, ax
 	xor	di, di
-	mov	cx, 4200h
+	mov	cx, 6000h
 	rep	stosw
 	xor	di, di
 	mov	ax, 0FFF8h	; Reserved entries in FAT
@@ -2420,7 +2274,7 @@ getdiskstructure:
 ;Clobbers AH,DH
 lineardiskop:
 	cmp	[disklba], byte 0
-	;je	.chs;$$$$$
+	je	.chs
 	add	ah, 40h
 	push	si
 	push	di
@@ -3584,7 +3438,7 @@ bootcheck_end:
 ; Stringtable
 
 s_name	db	0B5h, ' SSD Format ', 0C6h
-s_vsn	db	'1.8a'		; should start with v but this is unreleased checkpoint
+s_vsn	db	'1.8b'		; should start with v but this is unreleased checkpoint
 s_nomem	db	'Not enough RAM'
 s_disk	db	'format disk '
 s_mb	db	' MB'
