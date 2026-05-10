@@ -1197,7 +1197,7 @@ maxfatsize32:
 	push	ax
 	mov	ax, [maxclusters]
 	mov	dx, [maxclusters + 2]
-	add	ax, 129
+	add	ax, 129		; Number of sectors per FAT for this many clusters
 	adc	dx, 0
 	shr	dx, 1
 	rcr	ax, 1
@@ -1210,68 +1210,66 @@ maxfatsize32:
 	add	ax, si
 	adc	dx, 0
 .maxfat32a:
-	shl	ax, 1	; two FATs
+	shl	ax, 1		; two FATs
 	rcl	dx, 1
 	pop	si
 	add	ax, si
 	pop	si
 	adc	dx, di
 	jc	.whole
+	push	si
 	mov	si, [minclustsizem]
 	cmp	si, 4
 	jnz	.calcmaxfat32x
 	mov	si, 4
 .calcmaxfat32x:
+	push	cx
+	mov	cx, si
+	add	si, cx
+	add	si, cx
 	add	ax, si
 	adc	dx, 0
-	jc	.whole
-	add	ax, si
-	adc	dx, 0
-	jc	.whole
-	add	ax, si
-	adc	dx, 0
-	jc	.whole
+	pop	cx
+	jc	.wholep
+	pop	si
 	ret
+.wholep	pop	si
 .whole	mov	ax, 0FFFFh
 	mov	dx, 0FFFFh
 	ret
 
-;Input: Number of secters in partition in DX:AX, sectors per cluster in BX
+;Input: Number of secters in partition in DX:AX, minimum sectors per cluster in BX
 ;Output: Number of sectors in FAT in DX:AX, number of clusters in SI:CX, actual sectors per cluster in BX, reserved clusters in DI
 ;Preserves BP
 fatsize32:
-	push	bp
+	test	dx, dx
+	jnz	.n0
+	xor	si, si		; Can't make FAT32 < 32KB
+	ret			; Special check as it would break the algorithm to try
+
+.n0	push	bp
 
 	mov	si, [minclustsizem]
 	cmp	si, 4
 	jae	.notm1
 	mov	si, 4
-.notm1	mov	di, si
-	add	di, si
-	add	di, si		; DI = number of reserved sectors
-	sub	ax, cx
-	sbb	dx, 0
-	jc	.no
-	push	di
+.notm1	mov	bp, si
+	add	bp, si
+	add	bp, si		; BP = number of reserved sectors
+	mov	di, [minclustsizem]
+	mov	bx, ax		; CX:BX = number of sectors in partition
+	mov	cx, dx
 	jmp	.mmr
-.no	xor	si, si
-	xor	cx, cx
-	pop	bp
-	ret
 .clamp	mov	si, 64
 	call	maxfatsize32
 	mov	di, 64
-.mmr	mov	bx, ax
+	mov	bx, ax
 	mov	cx, dx
-	mov	di, [minclustsizem]
-	cmp	di, 8
-	jb	.notm2
-	mov	di, 8		; Not making FAT32 with less than 4KB / sector
-.notm2	shr	di, 1
+	shr	di, 1
 .mcs	cmp	di, 64
 	je	.clamp
 	shl	di, 1
-	mov	si, di
+.mmr	mov	si, di
 	call	maxfatsize32
 	cmp	dx, cx
 	ja	.ucs
@@ -1280,8 +1278,10 @@ fatsize32:
 	jb	.mcs
 .ucs:	mov	ax, bx
 	mov	dx, cx
+	sub	ax, bp
+	sbb	dx, 0
 	mov	si, [minclustsizem]
-	mov	bx, 128
+	mov	bx, 128			; Entries per FAT sector
 	jmp	.phys
 .physl	shr	dx, 1
 	rcr	ax, 1
@@ -1291,22 +1291,23 @@ fatsize32:
 	jnz	.physl
 	mov	cx, di
 	call	fatsizexcomp
-	push	ax		 ; FAT size is in physical sectors, convert to logical
+	push	ax			; FAT size is in physical sectors, convert to logical
 	push	dx
-	xor	dx, dx
-	mov	ax, cx
+	xchg	ax, di			; Starting with sectors per cluster
+	mul	word [minclustsizem]
+	xchg	ax, bx			; BX = sectors per cluster
+	mov	ax, cx			; Low half of FAT size
 	mul	word [minclustsizem]
 	mov	cx, ax
-	mov	ax, si
-	mov	bx, dx
+	mov	ax, si			; High half
+	mov	di, dx
 	mul	word [minclustsizem]	; Cannot overflow
 	mov	dx, ax
-	add	dx, bx
+	add	dx, di
 	mov	ax, cx
 	pop	si
 	pop	cx
-	mov	bx, di
-	pop	di
+	mov	di, bp
 	pop	bp
 	ret
 
