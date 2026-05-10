@@ -44,11 +44,12 @@ _start:
 	mov	[rebootmsg], byte 0
 	mov	[maxclusters + 2], word 0
 	int	12h
-	sub	ax, 64 + 3 + 24 + 32 * 3 + 6 + 4
+	sub	ax, 64 + 3 + 24 + 32 * 3 + 6 + 46 + 4
 	jc	.nenuf
 	; We need this much conventional memory to be able to scan any possible disk
 	; 64 KB kernel (includes unmanaged low memory) + 3KB resident shell
 	; 20 KB disk check program code + static data, 3x 32 K buffers, 6K bitbuffer cache
+	; 46 KB for misc. drivers
 	; 4K reserved in case something grows
 	; This size is barely larger than our own size on the same kernel.
 	mov	[maxclusters], ax	; Temporarily contains KB; will multiply below
@@ -63,12 +64,14 @@ _start:
 	jb	.finalizemaxclusters	; can't load high memory driver
 					; in theory such a PC could exist but
 					; none known and himem doesn't support it
-	sub	cx, 32			; We only benefit from about half of it
 	sub	[maxclusters], word 2	; high memory driver
 	jc	.noloadhigh		; this PC stinks
-	add	[maxclusters], cx	; Memory between 1K and 16K
+	sub	cx, highmemoryreserve	; Not all high memory is ours
+	jnc	.ncc801
+	xor	cx, cx
+.ncc801	add	[maxclusters], cx	; Memory between 1M and 16M
 	adc	[maxclusters + 2], byte 0
-	jmp	.ishigh
+	;jmp	.ishigh
 .ishigh	xchg	ax, dx	; it's fine if we get here with dx 0; check bypasses the sub
 	mov	bx, 64
 	mul	bx
@@ -83,8 +86,10 @@ _start:
 	jb	.finalizemaxclusters
 	sub	[maxclusters], word 2	; high memory driver
 	jc	.noloadhigh		; this PC stinks
-	sub	cx, 32
-	add	[maxclusters], cx
+	sub	cx, highmemoryreserve
+	jc	.ncc88
+	xor	cx, cx
+.ncc88	add	[maxclusters], cx
 	adc	[maxclusters + 2], byte 0
 	jmp	.finalizemaxclusters
 .noloadhigh:
@@ -94,6 +99,7 @@ _start:
 	mov	ax, [maxclusters]
 	mul	bx
 	mov	[maxclusters], ax
+	xchg	ax, dx
 	xchg	[maxclusters + 2], ax
 	mul	bx
 	test	dx, dx
@@ -109,11 +115,11 @@ _start:
 	mov	[maxclusters], word 0FFF5h
 	mov	[maxclusters + 2], word 0FFFh
 .gotmaxclusters:
-	cmp	[maxclusters], word 0
+	cmp	[maxclusters + 2], word 0
 	jne	.gotmaxclusters2
-.nenuv	jmp	.nenuf
-	cmp	[maxclusters + 2], word 0FFF8h
-	jb	.nenuv
+	cmp	[maxclusters], word 0FFF5h
+	jae	.gotmaxclusters2
+	jmp	.nenuf
 .gotmaxclusters2:
 	xor	ax, ax
 	mov	[lvolumeserial], ax
@@ -229,6 +235,7 @@ nextdisk:
 	mul	bx
 	add	[di + 14], ax
 	adc	dx, 0
+	jc	.ovflo
 	jz	.novflo
 	; Disk is too big; just say max size
 .ovflo	mov	ax, 0FFFFh
@@ -237,10 +244,6 @@ nextdisk:
 	mov	[di + 12], ax
 	mov	[di + 14], ax
 .novflo	pop	dx
-	mov	ax, [di + 8]
-	mov	dx, [di + 10]
-	mov	bx, [di + 12]
-	mov	cx, [di + 14]
 .nolba	inc	dx
 	jmp	nextdisk
 
@@ -904,7 +907,7 @@ calcsizesstuff:
 	cmp	[di], byte 32	; Get partition type code
 	jne	.f1216
 	test	[disklba], byte 1
-	jne	.chs32
+	jz	.chs32
 	mov	[di + 1], byte 0Ch
 	jmp	.final
 .chs32	mov	[di + 1], byte 0Bh
@@ -1185,29 +1188,32 @@ fatsize:
 ; Output: DX:AX = number of sectors that could be used
 ; Preserves: BX, CX, DI, BP
 maxfatsize32:
+	push	cx
 	mov	ax, [maxclusters]
 	mov	dx, [maxclusters + 2]
+	jmp	.clusterloop2
 .clusterloop:
 	shl	ax, 1
 	rcl	dx, 1
 	jc	.whole
-	dec	si
+.clusterloop2:
+	shr	si, 1
 	jnz	.clusterloop
 	push	dx
 	push	ax
 	mov	ax, [maxclusters]
 	mov	dx, [maxclusters + 2]
 	add	ax, 129		; Number of sectors per FAT for this many clusters
-	adc	dx, 0
-	shr	dx, 1
+	adc	dx, 0		; 2 for extra slots, 127 for overflow
+	mov	cx, 7		; Divide by 128
+.div	shr	dx, 1
 	rcr	ax, 1
-	shr	dx, 1
-	rcr	ax, 1
+	loop	.div
 	mov	si, [minclustsizem]
 	dec	si
 	test	ax, si
 	jnz	.maxfat32a
-	add	ax, si
+	add	ax, si		; Align FATs
 	adc	dx, 0
 .maxfat32a:
 	shl	ax, 1		; two FATs
@@ -1215,27 +1221,24 @@ maxfatsize32:
 	pop	si
 	add	ax, si
 	pop	si
-	adc	dx, di
+	adc	dx, si
 	jc	.whole
-	push	si
 	mov	si, [minclustsizem]
 	cmp	si, 4
 	jnz	.calcmaxfat32x
 	mov	si, 4
 .calcmaxfat32x:
-	push	cx
 	mov	cx, si
 	add	si, cx
 	add	si, cx
 	add	ax, si
 	adc	dx, 0
+	jc	.whole
 	pop	cx
-	jc	.wholep
-	pop	si
 	ret
-.wholep	pop	si
 .whole	mov	ax, 0FFFFh
 	mov	dx, 0FFFFh
+	pop	cx
 	ret
 
 ;Input: Number of secters in partition in DX:AX, minimum sectors per cluster in BX
@@ -1263,9 +1266,7 @@ fatsize32:
 .clamp	mov	si, 64
 	call	maxfatsize32
 	mov	di, 64
-	mov	bx, ax
-	mov	cx, dx
-	shr	di, 1
+	jmp	.ucs2
 .mcs	cmp	di, 64
 	je	.clamp
 	shl	di, 1
@@ -1278,7 +1279,7 @@ fatsize32:
 	jb	.mcs
 .ucs:	mov	ax, bx
 	mov	dx, cx
-	sub	ax, bp
+.ucs2	sub	ax, bp
 	sbb	dx, 0
 	mov	si, [minclustsizem]
 	mov	bx, 128			; Entries per FAT sector
@@ -3569,6 +3570,8 @@ maxclusters	equ	bss + 100	; Size = 4 bytes, maximum number of clusters permitted
 ebrbasis	equ	bss + 104	; Parameter from mkall to patchsuperblockmbr
 lvolumeserial	equ	bss + 108	; Size = 4 bytes, last volume serial number generated
 fat32spill	equ	bss + 112	; Size is currently 2 bytes
+
+highmemoryreserve	equ	192 - 32	; DOS kernel high + command line history eats into high memory
 
 disktable	equ	09000h
 ;[disktable] = bytes per sector
