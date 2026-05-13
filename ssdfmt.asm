@@ -653,7 +653,7 @@ mkfat32	mov	bl, al
 	mov	ax, [di + 2]
 	mul	word [di + 4]
 	mul	word [di + 6]	; CHS size in DX:AX
-	; While we do in fact check for sector size != 512 bytes, and it could be implemented here
+	; While we do in fact check for sector size != 512 bytes, and it could be implemented here,
 	; until some DOS supports it there's no point trying to actually use it. Non-512 goes to
 	; force CHS which in turn goes to BIOS will emulate 512.
 	cmp	[di], word 512
@@ -1905,9 +1905,8 @@ patchsuperblockmbr:
 	push	word [es:20h]
 	cmp	ax, [diskebroffset]
 	jne	.ebrb
-	cmp	dx, [diskebroffset]
-	jne	.ebrb
-	jmp	.ebrgen
+	cmp	dx, [diskebroffset + 2]
+	je	.ebrgen
 .ebrb	push	di
 	push	ax
 	xor	di, di
@@ -1917,8 +1916,8 @@ patchsuperblockmbr:
 	xor	di, di
 	call	gennobootmsg
 	pop	ax
-.ebrgen pop	di			; Get disk table back
-	mov	[es:1FDh], byte 0
+	pop	di			; Get disk table back
+.ebrgen	mov	[es:1FDh], byte 0
 	mov	[es:1BEh + 4], bl
 	pop	word [es:1BEh + 12]	; pop length
 	pop	word [es:1BEh + 14]
