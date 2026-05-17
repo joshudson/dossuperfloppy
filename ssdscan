@@ -25,8 +25,10 @@ prompts to repair bad sector reads.
 Options:
   /F  Passing /F fixes all errors without prompting. The only prompt that
       can occur is F/D for "is marked as directory but seems to not be".
-  /C  Passing /C validates the chain length of all files and checks if
-      the files are linked to bad blocks. This check is optional as it
+  /C  Passing /C traverses all chains during directory tree scan,
+      validating the chain length of all files, and checking if the files
+      are linked to bad blocks. This also permits lost file check to find
+      and recover cycles in the filesystem. This check is optional as it
       is quite slow and almost never necessary.
   /B  Performs a read-only test on clusters currently marked bad.
       This should be done aftery copying the image to a new SSD, as
@@ -146,8 +148,8 @@ Repairable errors in filesystems:
 * Free block in use
   - Repairing it sets it to end of chain.
 * Cross-linked cluster
-  - Repairing it truncates the file that has the previous cluster later
-    in the disk.
+  - Repairing it truncates the file later in the disk that has the
+    previous cluster.
 * <<file>> has invalid filename character
 * <<file>> has a reserved name
 * <<file>> is an anomalous directory entry
@@ -156,6 +158,8 @@ Repairable errors in filesystems:
   - Repairing deletes it
 * <<file>> refers to a crosslinked cluster
   - Repairing deletes it
+* <<file>> has a crosslinked cluster (/C specified)
+  - Repairing truncates the file at the point of the crosslink.
 * <<file>> is marked as a directory but seems to not be
   - The directory attribute bit got toggled on a file.
   - The first sector of the directory got destroyed.

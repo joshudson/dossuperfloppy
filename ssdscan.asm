@@ -26,19 +26,21 @@ ORG 0100h
 ;  repair (truncate) crosslink
 ; at the end of this loop we can prove there are no 01 remaining as they would have been repaired
 
+; If cycle detection is enabled, clear all "reached" bits. We know there's no crosslinks anymore.
+
 ;Directory Structure:
 ; recursively read in directory structure from root
 ;  perform basic validation of directory entries; skip any LFS entries and volume label
 ;  if a file has no clusters its length must be zero
 ;  mark starting cluster as reached
-;  if length flag check set, traverse FAT, checking if chain ends too soon or too late
+;  if length or cycle flag check set, traverse FAT, checking if chain ends too soon or too late
 ;   we just fix the size to match the length of the FAT chain
 
 ;Recovering lost files (we know by counters if we need to run this or not)
 ; traverse bitmap array, recover any lost files; they have value 10 in the bitmap array
 ; FAT16: if root dir is full, make a directory LOST.FND to recover the file into
 
-; Copyright (C) Joshua Hudson, 2024-25
+; Copyright (C) Joshua Hudson, 2024-26
 
 ; DOS maximum path length is 80 characters.
 ; ISO9660 has a maximum directory limit of 8 with root being 1.
@@ -485,9 +487,9 @@ stage_media_descriptor:
 .hncc	mov	dl, [es:015h]	; media descriptor is now in DL
 	cmp	bx, 0
 	jne	.f32
-	cmp	ax, 0FFF6h
+	cmp	ax, 0FFF7h
 	jae	.f32
-	cmp	ax, 0FF6h
+	cmp	ax, 0FF7h
 	jae	.f16
 	mov	[fattype], byte 12
 	jmp	.gftyp
@@ -1010,67 +1012,10 @@ initpools:
 	clc
 	ret
 
-.hmem:	; All memory allocated
-	; Zero memory map
-	mov	si, bitvectorptrs
-.lfatl	mov	bl, [si + bitvectortype]
-	cmp	bl, byte 0
-	je	.lfat0
-	;DX:AX = number of bytes owned
-	mov	ax, [si + bitvectorlength]
-	mov	dx, [si + bitvectorlength + 2]
-	add	ax, 3
-	adc	dx, 0
-	shr	dx, 1
-	rcr	ax, 1
-	shr	dx, 1
-	rcr	ax, 1
-	cmp	bl, byte b_mem_xms
-	jb	.h0seg
-	; It's some kind of API-swapped memory
-	xor	bx, bx
-	xor	di, di
-	mov	cx, [si + bitvectorptr]
-	mov	[xms_xfer_dst], cx
-.cfbcb	mov	[xms_xfer_dstoff], bx		; Right now the only kind of API-swapped memory is XMS so we do that.
-	mov	[xms_xfer_dstoff + 2], di
-	push	ax
-	call	xmscopy
-	pop	ax
-	add	bx, [xms_xfer_len]
-	adc	di, 0
-	sub	ax, [xms_xfer_len]
-	sbb	dx, 0
-	jc	.lfatn
-	jnz	.cfbcb
-	test	ax, ax
-	jnz	.cfbcb
-	jmp	.lfatn
-.h0seg	mov	es, [si + bitvectorptr + 2]	; Fundamental assumption: a *big* record is paragraph aligned
-	shr	ax, 1
-	pushf
-	push	ax
-	or	dx, dx
-	jz	.h0snl
-.h0sl	mov	cx, 32768
-	xor	ax, ax
-	xor	di, di
-	rep	stosw
-	mov	ax, es
-	add	ax, 1000h
-	mov	es, ax
-	dec	dx
-	jnz	.h0sl
-.h0snl	pop	cx
-	xor	ax, ax
-	mov	di, [si + bitvectorptr]
-	rep	stosw
-	popf
-	jnc	.lfatn
-	stosb
-.lfatn	add	si, bitvectorrlen
-	cmp	si, bitvectorptrs + bitvectorrlen * 128
-	jl	.lfatl
+.hmem	mov	cx, init_zero		; All memory allocated: zero bitvector
+	push	cx
+	mov	ch, 0Fh
+	call	scanbitsclust
 
 	; Final Media Descriptor Check; any FAT have a Media Descriptor?
 .lfat0	xor	dx, dx
@@ -1552,11 +1497,7 @@ stage_fat:
 	call	invalidatesector
 	pop	dx
 	pop	ax
-	mov	bx, 0FFFh
-	push	bx
-	mov	bx, [endchainlow]
-	push	bx
-	call	setclusterinfats
+	call	setendchaininfats
 	pop	es
 .notoverlarge:		; Technically the label is correct, the entry is not over the maximum size
 	push	ax	; However it is also not referring to a known-free cluster
@@ -1667,13 +1608,26 @@ stage_fat:
 	mov	sp, bp
 	call	checkmark
 
+stage_dirwalk:
 	;Count up number of (non-empty) files in the FS
+	test	[opflags], byte opflag_c
+	jnz	.initc
 	mov	cx, totalfilesinc
 	push	cx
 	mov	ch, 2
 	call	scanbitsclust
-stage_dirwalk:
-	mov	dx, state_dir
+	jmp	.walk
+
+.initc	mov	cx, init_c
+	push	cx
+	mov	ch, 0Fh
+	call	scanbitsclust
+	mov	ax, [rootclust]
+	mov	dx, [rootclust + 2]
+	mov	ch, 1		; Root cluster is reached
+	call	setbitsclust
+
+.walk	mov	dx, state_dir
 	call	outstring
 	mov	ax, [rootclust]
 	mov	dx, [rootclust + 2]
@@ -1691,6 +1645,8 @@ stage_dirwalk:
 	mov	bx, 1
 	call	descendtree
 
+	test	[opflags], byte opflag_c
+	jnz	stage_recover		; Check for unreferenced loops
 	cmp	[pgdisplay], byte 100
 	jae	stage_finalize
 
@@ -1701,11 +1657,13 @@ stage_recover:
 	mov	ch, 2
 	call	scanbitsclust
 
+	test	[opflags], byte opflag_c
+	jnz	.files
 	cmp	[pgdisplay], byte 100
 	jae	stage_finalize
 
 	; Next: recover files (all in this stage because % measurement)
-	mov	cx, recoverfiles
+.files	mov	cx, recoverfiles
 	push	cx
 	mov	ch, 2
 	call	scanbitsclust
@@ -2002,6 +1960,14 @@ getnextcluster:
 .found	pop	di
 	jmp	[entryfromblock]
 
+setendchaininfats:
+	pop	cx
+	mov	bx, 0FFFh
+	push	bx
+	mov	bx, [endchainlow]
+	push	bx
+	push	cx
+
 	; Arguments: ES=buffer, DX:AX = cluster to set, SP+2:SP+4 = value to set it to
 	; pops argument from stack, destroys BX, CX, SI
 setclusterinfats:
@@ -2185,6 +2151,7 @@ descendtree:
 				;	8 = look for nonzero scan
 				;	10 = validate . and ..
 				;	12 = validate VFAT continuance
+				;	14 = nothing (traverse for xlink check)
 				; BP - 30 = enumerator recovery state cluster
 				; BP - 32 = enumerator recovery state offset
 	mov	[bp - 36], cx	; BP - 38 = sector loaded into buf2seg
@@ -2385,17 +2352,53 @@ descendtree:
 	cmp	al, 'y'
 	mov	ax, [bp - 42]
 	mov	dx, [bp - 40]
-	jne	.enddirectoryclean
+	jne	.enddirectorycleanv
 	mov	[bp - 26], byte 255
 	mov	di, [bp - 8]
 	jmp	.readdirbadsector_recover
 .advanceisnotbad:
 	mov	es, [buf4seg]
 	call	isendchainagnostic
-	jc	.enddirectoryclean
-.advanceiscluster:
+	jc	.enddirectorycleanv
 	mov	[es:si + 4], ax
 	mov	[es:si + 6], dx
+	test	[opflags], byte opflag_c
+	jz	.advanceiscluster
+	mov	cx, 0FFFFh
+	cmp	[bp - 30], cx
+	jne	.advancecheckxlink
+	cmp	[bp - 28], cx
+	jne	.advanceiscluster
+.advancecheckxlink:
+	push	si
+	call	getbitsclust
+	pop	si
+	test	ch, 1
+	jz	.advanceiscluster_mark
+	mov	cx, state_dir
+	mov	dx, query_xlink
+	call	queryfixyn
+	cmp	al, 'y'
+	jne	.enddirectorycleanv	; We can't keep scanning!
+	mov	ax, [bp - 42]
+	mov	dx, [bp - 40]
+	mov	es, [buf1seg]
+	push	si
+	call	setendchaininfats
+	pop	si
+	mov	es, [buf4seg]
+.enddirectorycleanv:
+	jmp	.enddirectoryclean
+.advanceiscluster_mark:
+	mov	ax, [es:si + 4]
+	mov	dx, [es:si + 6]
+	push	si
+	mov	ch, 1
+	call	setbitsclust
+	pop	si
+	mov	ax, [es:si + 4]
+	mov	dx, [es:si + 6]
+.advanceiscluster:
 	and	[es:si + 8], word 8000h	;Reset entry within cluster, keep flag
 	;There are two possible encodings for transition at start of cluster:
 	;at the end of the last cluster and the start of the next.
@@ -2622,6 +2625,8 @@ descendtree:
 	push	ax
 	push	dx
 	call	getbitsclust
+	pop	dx
+	pop	ax
 	test	ch, 2
 	jz	.scanbits_free
 	test	ch, 1
@@ -2631,8 +2636,6 @@ descendtree:
 	call	incrementprogress
 	pop	di
 	mov	ch, 1
-	pop	dx
-	pop	ax
 	push	ax
 	push	dx
 	call	setbitsclust
@@ -2648,8 +2651,6 @@ descendtree:
 	jz	.scannormal_notdirectory_empty0
 	jmp	.scannormal_notdirectory_traverse
 .scanbits_free:
-	pop	dx
-	pop	ax
 	pop	si
 	pop	bx
 	mov	dx, query_freefile
@@ -2658,12 +2659,12 @@ descendtree:
 	jne	.scanbits_nofix
 	jmp	.scansetnormal_delete
 .scanbits_xlink:
-	pop	dx
-	pop	ax
 	push	ax
 	push	dx
 	push	di
+	mov	es, [buf1seg]
 	call	getnextcluster		; Is it bad?
+	mov	es, [buf2seg]
 	call	[isbadcluster]
 	pop	di
 	pop	dx
@@ -2678,13 +2679,18 @@ descendtree:
 	jmp	.scansetnormal_delete
 .scanbits_nofix:
 	jmp	.skipentry
+.scannormal_enddirectorydecision:
+	test	[opflags], byte opflag_c
+	jnz	.scannormal_xlinkonly
+	jmp	.enddirectory
+.scannormal_xlinkonly:
+	mov	[bp - 26], byte 14
+	jmp	.skipentry
 .scannormal:
 	cmp	[es:bx], byte 0
 	jne	.scannormal_entry
 	test	[opflags], byte opflag_x
-	jnz	.enddirectory
-	;test	[opflags], byte opflag_z
-	;jz	.scannormal_enddirstate
+	jnz	.scannormal_enddirectorydecision
 	mov	es, [buf4seg]
 	mov	ax, [es:si + 4]		; Set up for setting E5 if an entry is found below
 	mov	dx, [es:si + 6]
@@ -2757,6 +2763,8 @@ descendtree:
 	push	di
 	push	bx
 	mov	es, [buf1seg]
+	mov	[bp - 40], ax
+	mov	[bp - 42], dx
 	call	getnextcluster
 	call	[isbadcluster]
 	jne	.scannormal_notbad
@@ -2765,20 +2773,55 @@ descendtree:
 	mov	dx, query_fixbadptr
 	call	.queryfixentry
 	cmp	al, 'y'
-	jne	.scannormal_notdirectory_end2
+	jne	.scannormal_notdirectory_end2v
 	xor	dx, dx
 	xor	ax, ax
 	call	[setdircluster]
 	mov	[es:bx + 1Ch], ax
 	mov	[es:bx + 1Eh], ax
+.scannormal_notdirectory_end2v:
 	jmp	.scannormal_notdirectory_end2
 .scannormal_notbad:
 	call	isendchainagnostic
-	jc	.scannormal_endchain
+	jc	.scannormal_endchainv
+	push	ax
+	push	dx
+	call	getbitsclust
+	pop	dx
+	pop	ax
+	test	ch, byte 1
+	jz	.scannormal_notxlink
+	pop	bx
+	push	bx
+	push	ax
+	push	dx
+	mov	es, [buf2seg]
+	mov	dx, query_xlink2
+	call	.queryfixentry
+	mov	es, [buf1seg]
+	cmp	al, 'y'
+	pop	dx
+	pop	ax
+	jne	short .scannormal_notdirectory_end3v
+	mov	ax, [bp - 40]
+	mov	dx, [bp - 42]
+	call	setendchaininfats
+.scannormal_endchainv:
+	jmp	.scannormal_endchain
+.scannormal_notdirectory_end3v:
+	jmp	.scannormal_notdirectory_end3
+.scannormal_notxlink:
+	push	ax
+	push	dx
+	mov	ch, byte 1
+	call	setbitsclust
+	pop	dx
+	pop	ax
 	mov	cx, [bytesperclust]
 	add	[bp - 48], cx
 	adc	[bp - 50], word 0
 	jc	.scannormal_impossiblybig
+.scannormal_notxlink2:
 	mov	[bp - 40], ax
 	mov	[bp - 42], dx
 	call	getnextcluster
@@ -2786,16 +2829,25 @@ descendtree:
 	jne	.scannormal_notbad
 	jmp	.scannormal_subsequent_bad
 .scannormal_impossiblybig:
+	test	[bp - 9], byte 4
+	jnz	.scannormal_notxlink2
+	or	[bp - 9], byte 4
+	pop	bx
+	push	bx
+	push	ax
+	push	dx
 	mov	dx, out_crfile		; Too big
 	call	outstring
-	pop	bx
 	mov	es, [buf2seg]
 	call	.out_entryname
 	mov	dx, msg_2bigfile
 	call	outstring
 	mov	dx, state_dir
 	call	outstring
-	jmp	.scannormal_notdirectory_end2
+	mov	es, [buf1seg]
+	pop	dx
+	pop	ax
+	jmp	.scannormal_notxlink2
 .scannormal_subsequent_bad:
 	pop	bx
 	mov	es, [buf2seg]
@@ -2807,11 +2859,7 @@ descendtree:
 	push	bx
 	mov	ax, [bp - 40h]
 	mov	dx, [bp - 42h]
-	mov	cx, 0FFFh
-	push	cx
-	mov	cx, [endchainlow]
-	push	cx
-	call	setclusterinfats
+	call	setendchaininfats
 	or	[bp - 9], byte 4
 	jmp	.scannormal_endchain
 .scannormal_notdirectory_end3:
@@ -2843,8 +2891,8 @@ descendtree:
 .scannormal_file_tooshort:
 	add	si, [bytesperclust]	; File is too short; take whole clusters
 	adc	di, 0
-	jc	.scannormal_file_toolong	; naturally occurring pun
-	mov	si, 0FFFFh
+	jnc	.scannormal_file_toolong
+	mov	si, 0FFFFh		; Overflow: set to max size
 	mov	di, 0FFFFh
 .scannormal_file_toolong:
 	mov	es, [buf2seg]
@@ -3058,6 +3106,8 @@ descendtree:
 	mov	[bp - 16], cx
 	mov	[bp - 14], cx
 	mov	[bp - 12], cx
+	mov	[bp - 30], cx
+	mov	[bp - 28], cx
 	inc	cx		; set CX to 0
 	mov	[bp - 26], cx
 	ret
@@ -3770,10 +3820,15 @@ recoverdirs:
 	mov	[bp - 12], ax
 	mov	dx, [bp - 2]
 	mov	ax, [bp - 4]
-	mov	bx, [bp - 8]
-	mov	cx, [bp - 6]
-	mov	[savedfilename], ax
+	test	[opflags], byte opflag_c
+	jz	.recnc				; If not set, we don't get here on cycle
+	xor	di, di
+	call	recoverlength_loopfix
+	jmp	.recnc2				; Now we know there's no cycle
+.recnc	mov	[savedfilename], ax
 	mov	[savedfilename + 2], dx
+.recnc2	mov	bx, [bp - 8]
+	mov	cx, [bp - 6]
 	mov	[savedfilename + 4], bx
 	mov	[savedfilename + 6], cx
 	mov	dx, [bp - 10]	; LOST.FND
@@ -3877,18 +3932,11 @@ recoverfiles:
 	pop	dx
 	pop	ax
 	jne	recoverdirs.f_ret	; Declined to recover this one; we can continue
-	mov	[savedfilename], ax
-	mov	[savedfilename + 2], dx
-	xor	cx, cx
-	mov	[savedfilename + 4], cx
-	mov	[savedfilename + 6], cx
-	mov	es, [buf1seg]
-.szlp	call	getnextcluster
-	mov	cx, [bytesperclust]
-	add	[savedfilename + 4], cx
-	adc	[savedfilename + 6], word 0
-	call	isendchainagnostic
-	jnc	.szlp
+	xor	di, di
+	test	[opflags], byte opflag_c
+	jz	.rnc
+	inc	di
+.rnc	call	recoverlength_loopfix
 	call	mklostfnd
 	mov	bx, matchemptyslot.ret
 	mov	si, matchemptyslot
@@ -3914,6 +3962,55 @@ recoverfiles:
 	mov	[es:di + 1Eh], cx
 	lea	si, [di + 8]
 	jmp	recovernamefile
+
+recoverlength_loopfix:		; DX:AX = cluster, DI = flags; destroys everything but BP
+	mov	[savedfilename], ax
+	mov	[savedfilename + 2], dx
+	xor	cx, cx
+	mov	[savedfilename + 4], cx
+	mov	[savedfilename + 6], cx
+	mov	es, [buf1seg]
+.szlp	mov	[savedfilename + 8], ax
+	mov	[savedfilename + 10], dx
+	test	[opflags], byte opflag_c
+	jz	.ncbit
+	call	getbitsclust
+	test	ch, 1	; It's an orphaned chain that runs into a chain already reached
+	jnz	.trunc	; by a directory entry. Truncate it. We're already in recovery,
+			; no need to prompt.
+	mov	ax, [savedfilename + 8]
+	mov	dx, [savedfilename + 10]
+.ncbit	test	di, 1
+	jz	.nmark
+	mov	ch, 1
+	push	ax
+	push	dx
+	call	setbitsclust
+	pop	dx
+	pop	ax
+.nmark	mov	cx, [bytesperclust]
+	add	[savedfilename + 4], cx
+	adc	[savedfilename + 6], word 0
+	jnc	.nov
+	or	di, byte 2
+.nov	push	di
+	call	getnextcluster
+	pop	di
+	cmp	[savedfilename], ax
+	jne	.scec
+	cmp	[savedfilename + 2], dx
+	jne	.scec
+.trunc	mov	ax, [savedfilename + 8]
+	mov	dx, [savedfilename + 10]
+	call	setendchaininfats
+	jmp	.fin
+.scec	call	isendchainagnostic
+	jnc	.szlp
+.fin	test	di, 2
+	jz	.ret
+	mov	[savedfilename + 4], word 0FFFFh
+	mov	[savedfilename + 6], word 0FFFFh
+.ret	ret
 
 recovernamedir:
 	cmp	[fattype], byte 16
@@ -4306,6 +4403,56 @@ initdircluster:
 	pop	ax
 	ret
 
+init_zero:
+	xor	ax, ax
+	mov	cx, di
+	mov	di, bx
+	sub	cx, bx
+	jz	.whole
+	shr	cx, 1
+.zero	rep	stosw
+	jnc	.even
+	stosb
+.even	stc
+	ret
+.whole	mov	cx, 8000h	; CF is clear from sub above
+	jmp	.zero
+
+init_c:	; Called from scanbitsclust replacing the scan line function
+	; ES:BX = buffer, DI = stop point, return CF set to write back
+	mov	dl, 1
+.loop	mov	cl, [es:bx]
+	mov	al, cl
+	and	al, 03h
+	cmp	al, 1
+	jne	.ni1
+	call	totalfilesinc
+.ni1	mov	al, cl
+	and	al, 0Ch
+	cmp	al, 4
+	jne	.ni2
+	call	totalfilesinc
+.ni2	mov	al, cl
+	and	al, 30h
+	cmp	al, 10h
+	jne	.ni3
+	call	totalfilesinc
+.ni3	mov	al, cl
+	and	al, 0C0h
+	cmp	al, 40h
+	jne	.ni4
+	call	totalfilesinc
+.ni4	test	cl, 055h
+	jz	.nw
+	mov	dl, 0
+	and	cl, 0AAh
+	mov	[es:bx], cl
+.nw	inc	bx
+	cmp	bx, di
+	jne	.loop
+	cmp	dl, 1	; set CF if we cleared any "reached" bits
+	ret
+
 totalfilesinc:
 	add	[totalfiles], word 1
 	adc	[totalfiles + 2], word 0
@@ -4397,7 +4544,7 @@ incrementprogress:	; DI=pointer to total, destroys nothing
 	jmp	.r
 
 	; Entry point; DX:AX = base cluster no, DI = offset
-	; Result in CH; destroys everything but DI and ES
+	; Result in CH; destroys everything but DI, BP, and ES
 getbitsclustdi:
 	add	ax, di
 	adc	dx, 0
@@ -4667,7 +4814,7 @@ scanbitsclust:
 	dec	bx
 	jnz	.mid
 	pop	di
-.mide	add	di, [bp - 4]
+.mide	mov	bx, [bp - 4]
 	call	.inner
 .cont	add	si, bitvectorrlen
 	cmp	si, bitvectorptrs + bitvectorrlen * 128
@@ -4725,10 +4872,12 @@ scanbitsclust:
 	sub	di, [si + 6]
 	sbb	bx, [si + 8]
 	call	.div4ceil	; 4 entries per byte
-	mov	es, [si + 4]
+	mov	es, [si + 4]	; bx got set to 0 by the above, a cache line can't be > 32K in size
 	pop	si		; get record selected back
 	call	.inner
-	cmp	dx, [bp - 10]
+	jnc	.nfwb
+	or	[si], byte 1
+.nfwb	cmp	dx, [bp - 10]
 	jb	.xmsnxt
 	ja	.xmslst
 	cmp	ax, [bp - 12]
@@ -4748,7 +4897,29 @@ scanbitsclust:
 	rcr	di, 1
 	ret
 
-.inner	push	bx		; .inner destroys CL only
+.innerx	call	.match		; .inner full replacement
+	pushf			; returns CF set if write back
+	push	cx
+	mov	cx, di
+	sub	cx, bx
+	jz	.ixf
+	add	ax, cx
+	adc	dx, 0
+	add	ax, cx
+	adc	dx, 0
+	add	ax, cx
+	adc	dx, 0
+	add	ax, cx
+	adc	dx, 0
+.out	pop	cx
+	popf
+	ret
+.ixf	add	dx, 4
+	jmp	.out
+
+.inner	cmp	ch, 0F0h
+	jae	.innerx
+	push	bx		; .inner destroys CL only
 	mov	bx, [bp - 4]	; offset, saved above
 	test	al, 2		; Loop is unrolled -- must be first entry
 	jnz	.inner2
@@ -4789,7 +4960,7 @@ scanbitsclust:
 	inc	bx
 	cmp	bx, di
 	jne	.innerl
-	pop	bx
+	pop	bx			; CF clear if we get here
 	ret
 
 .match	push	ax			; Yes we save every single register. We're using them.
@@ -5411,6 +5582,7 @@ descendtreetable:
 	dw	descendtree.scannotzero
 	dw	descendtree.scanvalidatedotentries
 	dw	descendtree.scanlfnsubsequent
+	dw	descendtree.skipentry
 
 fptrcnt	equ	10
 fptrs12:
@@ -5479,7 +5651,7 @@ msg_usage	db	'SSDSCAN alpha4', 13, 10
 		db	'Copyright (C) Joshua Hudson 2024-2026', 13, 10
 		db	'Usage: SSDSCAN DRIVE: [/F] [/C] [/D] [/B] [/Z]', 13, 10
 		db	'/F   Fix errors without prompting', 13, 10
-		db	'/C   Check chain length against file length', 13, 10
+		db	'/C   Check chain length against file length & check for cycles', 13, 10
 		db	'/B   Retest clusters currently marked bad', 13, 10
 		db	'/Z   Recovery directories that have zeroed sectors in the middle', 13, 10
 		db	'     (caution: 0 is normally the directory terminator; can damage FS instead)', 13, 10
@@ -5545,7 +5717,8 @@ query_dirbadsec	db	"Bad sector encountered reading directory, replace?$"
 query_fixtail	db	"Bad sector marker encountered at end of directory, repair directory?$"
 query_fixbadlen	db	" has an impossible length, fix?$"
 query_fixbadptr	db	" has a bad block in chain, truncate?$"
-query_recdir1	db	"Found lost directory $"
+query_xlink2	db	" has a crosslinked cluster, repair?$"
+query_recdir1	db	"Found lost dir $"
 query_recdir2	db	".CHK via $"
 query_recfile	db	"Found lost file $"
 query_recq	db	".CHK, recover?$"
@@ -5637,7 +5810,7 @@ vfatsum		resb	1
 rootdirsect	resb	4
 
 bitbufseg	resb	2
-bitbufsi	resb	2
+bitbufsi	resb	2		; Points into bitvectorptrs, low bit = dirty flag
 bitbufbx	resb	2
 bitbufes	resb	2
 bitbuflow	resb	4

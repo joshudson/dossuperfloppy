@@ -16,9 +16,9 @@ _start	mov	dx, stconv
 	mov	ax, 0E801h
 	int	15h
 	jc	.ne801
-	cmp	ah, 86h
-	je	.ne801
-	cmp	ah, 80h
+	cmp	ah, 86h		; DOSBOX goofed this call up
+	je	.ne801		; but a value over 3C00h can't happen
+	cmp	ah, 80h		; so we know it's an error code
 	je	.ne801
 	or	cx, cx
 	jnz	.uax
