@@ -125,6 +125,8 @@ _start:
 	je	.o5
 	cmp	al, 'X'
 	je	.o6
+	cmp	al, 'T'
+	je	.o7
 	jmp	.b
 .o1	or	bl, opflag_f
 	jmp	.b
@@ -137,6 +139,8 @@ _start:
 .o5	or	bl, opflag_z
 	jmp	.b
 .o6	or	bl, opflag_x
+	jmp	.b
+.o7	or	bl, opflag_t
 	jmp	.b
 .arg	mov	dx, msg_usage
 	call	outstring
@@ -166,8 +170,7 @@ _start:
 
 stage_media_descriptor:
 	mov	dx, state_media
-	mov	ah, 9
-	int	21h
+	call	outstring
 	mov	ax, ds
 	add	ax, (stackbottom) / 16
 	mov	[buf1seg], ax
@@ -198,8 +201,7 @@ stage_media_descriptor:
 	call	outax
 .errorZ	mov	dx, msg_error0
 .errorx	call	outstring
-	mov	al, error_nofix
-	jmp	exit
+	jmp	exit_nofix
 .read0	mov	bx, 16384
 .sz0	cmp	[es:bx], byte 0A0h
 	jne	.sz1
@@ -790,8 +792,7 @@ initpools:
 	jnc	.hcmem
 	mov	dx, msg_nocmem2
 	call	outstring
-	mov	al, error_nofix
-	jmp	exit
+	jmp	exit_nofix
 .hcmema	mov	ax, bx		; use the rest
 	mov	bl, b_mem_internal
 	call	.mcrec0p
@@ -846,7 +847,7 @@ initpools:
 	mov	ah, 1
 	call	far [xmsfunc]
 	cmp	ax, 1
-	jne      .himemdone
+	jne	.himemdone
 	;Code used to live here to get the DOS suballocation RAM and use it
 	;however DOS is actaully using it for something without allocating it
 	;(maybe because we aren't a driver).
@@ -1243,8 +1244,7 @@ stage_fat:
 	mov	dx, msg_nogoodfat
 	call	outstring
 .nofixfatdiff:
-	mov	al, error_nofix
-	jmp	exit
+	jmp	exit_nofix
 
 .quantify_have1:
 	mov	cl, 0
@@ -1303,8 +1303,7 @@ stage_fat:
 	call	queryfixyn
 	cmp	al, 'y'
 	je	.fxdesc
-	mov	al, error_nofix
-	jmp	exit		; Can't risk continuing as this could destroy entire FS
+	jmp	exit_nofix		; Can't risk continuing as this could destroy entire FS
 .fxdesc	mov	ah, 0FFh
 	mov	dx, 0FFFh
 	mov	al, [descriptor]
@@ -1736,6 +1735,10 @@ stage_finalize:
 	pop	ds
 .done	call	newline
 	mov	al, 0
+	test	[opflags + 1], byte opflag2_nofix
+	jne	exit
+exit_nofix:
+	mov	al, error_nofix
 exit:	mov	ah, 4Ch
 	push	ax
 	cmp	[savedaccessflag], word 0
@@ -1796,8 +1799,7 @@ iohandler:
 newbadsectors:
 	mov	dx, msg_replacer
 	call	outstring
-	mov	al, error_nofix
-	jmp	exit
+	jmp	exit_nofix
 
 ; CX = state string
 ; DX = question string
@@ -1811,8 +1813,9 @@ queryfixynpostcr:
 	call	outstring
 	test	[opflags], byte opflag_f
 	jnz	.y
-.again	mov	ah, 7
-	int	21h
+	test	[opflags], byte opflag_t
+	jnz	.n
+.again	call	inchar
 	cmp	al, 3
 	je	.cc
 	cmp	al, 27
@@ -1822,17 +1825,21 @@ queryfixynpostcr:
 	je	.yn
 	cmp	al, 'n'
 	jne	.again
-.yn	push	ax
+.yn	cmp	al, 'n'
+	jne	.yn2
+	or	[opflags + 1], byte opflag2_nofix
+.yn2	push	ax
 	mov	dx, cx
 	call	outstring
 	pop	ax
 	ret
-.y	push	bp
-	mov	dl, 'y'
-	mov	ah, 2
-	int	21h
+.y	mov	dl, 'y'
+	call	outchar
 	mov	al, 'y'
-	pop	bp
+	jmp	.yn
+.n	mov	dl, 'n'
+	call	outchar
+	mov	al, 'n'
 	jmp	.yn
 .cc	jmp	ctrlchandler
 
@@ -1865,7 +1872,6 @@ gendigits:
 outax:
 	push	ax
 	push	dx
-	push	bp
 	mov	cx, 404h
 .nxt	rol	ax, cl
 	push	ax
@@ -1874,13 +1880,11 @@ outax:
 	cmp	al, '9'
 	jbe	.nadj
 	add	al, 7
-.nadj	mov	ah, 2
-	mov	dl, al
-	int	21h
+.nadj	mov	dl, al
+	call	outchar
 	pop	ax
 	dec	ch
 	jnz	.nxt
-	pop	bp
 	pop	dx
 	pop	ax
 	ret
@@ -2115,8 +2119,7 @@ checkrootclustno:
 .good	ret
 .bad	mov	dx, msg_badroot
 	call	outstring
-	mov	al, error_nofix
-	jmp	exit
+	jmp	exit_nofix
 
 	; Descend a directory tree. Called once with root dir as argument, and once
 	; for each recovered directory. DX:AX = cluster (0 = root [when not cluster])
@@ -2269,8 +2272,7 @@ descendtree:
 	; A bad sector in the root directory is not recoverable.
 	mov	dx, msg_rootbadsect
 	call	outstring
-	mov	al, error_nofix
-	jmp	exit
+	jmp	exit_nofix
 .postreaddirbadsector:			; means after the bad sector check on readdir
 	mov	ah, 0Bh			; Checks for ^C as INT 25h doesn't
 	int	21h
@@ -2483,6 +2485,8 @@ descendtree:
 .scanlfnremove1:
 	jmp	.scansetnormal_delete
 .scanvolume:
+	test	[opflags], byte opflag_t
+	jnz	short .scanlfnskipentryv	; No fix? Don't bother with LFN
 	cmp	[es:bx + 0Bh], byte 0Fh
 	jne	short .scanlfnskipentryv	; It's not an LFN entry
 .scanlfnfirst:			; It's an LFN entry. We remove stale LFN entries.
@@ -2543,11 +2547,14 @@ descendtree:
 	cmp	[es:bx + 14h], cx
 	jne	.scansetnormal_notallones
 .scansetnormal_delete:
+	test	[opflags], byte opflag_t
+	jnz	.scansetnormal_allones_skipentryv
 	mov	[es:bx], byte 0E5h	; Auto-repair all ones entry (recovered bad sector *properly*)
 	mov	[es:bx + 0Dh], byte 0E5h
 	mov	[es:bx + 14h], word 0
 	mov	[es:bx + 1Ah], word 0
 	or	[bp - 9], byte 2	; set dirty bit
+.scansetnormal_allones_skipentryv:
 	jmp	.skipentry
 .scansetnormal_notallones:
 	test	[es:bx + 0Bh], byte 8
@@ -2700,12 +2707,15 @@ descendtree:
 	mov	[bp - 12], bx
 .scannormal_enddirstate:
 	mov	[bp - 26], byte 8
+	test	[opflags], byte opflag_t
+	jz	.scannormal_enddirstate_out
+	mov	[bp - 26], byte 14
+.scannormal_enddirstate_out:
 	jmp	.skipentry
 .scannormal_toodeep:
 	mov	dx, msg_toodeep
 	call	outstring
-	mov	al, error_nofix
-	jmp	exit
+	jmp	exit_nofix
 .scannormal_directory:
 	;We encountered a directory, set up to descend
 	cmp	si, 500
@@ -2983,6 +2993,8 @@ descendtree:
 
 	; Rebuild trashed . entries from bad sector recovery
 .dotentries_allbits:
+	test	[opflags], byte opflag_t
+	jnz	.scanvaliddotentries_t
 	xor	di, di
 	mov	es, [buf2seg]
 	mov	bx, [es:si + 2]
@@ -2998,6 +3010,12 @@ descendtree:
 	call	generatedotdirectoryentry
 	or	[bp - 9], byte 2	; set dirty bit
 	jmp	.dotentries_match2
+
+.scanvaliddotentries_t:
+	mov	dx, msg_dirdmgt
+	call	outstring
+	mov	ah, error_nofix
+	jmp	exit
 
 .scanvalidatedotentries:
 	; There's four things that can happen
@@ -3022,6 +3040,8 @@ descendtree:
 	call	check_dots
 	je	.dotentries_match
 .dotentries_nomatch:
+	test	[opflags], byte opflag_t
+	jnz	.scanvaliddotentries_t
 	; It's not a directory; prompt repair/clear
 	mov	dx, out_crfile
 	call	outstring
@@ -3029,8 +3049,7 @@ descendtree:
 	call	.out_entrynameds
 	mov	dx, query_dirnot
 	call	outstring
-.again	mov	ah, 7
-	int	21h
+.again	call	outchar
 	cmp	al, 3
 	je	.cc
 	cmp	al, 27
@@ -3260,7 +3279,6 @@ descendtree:
 	push	bx
 	push	cx
 	push	dx
-	push	bp		; Some DOS apparently depends on BIOS saving BP but some BIOS doesn't
 	mov	cl, 0
 .out_el	mov	dl, [bx]
 	test	cl, cl
@@ -3282,19 +3300,16 @@ descendtree:
 .out_en0a:
 	mov	dl, '?'
 .out_en0b:
-	mov	ah, 2
-	int	21h
+	call	outchar
 	inc	bx
 	inc	cx
 	cmp	cl, 8
 	jne	.out_en8
 	mov	dl, '.'
-	mov	ah, 2
-	int	21h
+	call	outchar
 .out_en8:
 	cmp	cl, 11
 	jne	.out_el
-	pop	bp
 	pop	dx
 	pop	cx
 	pop	bx
@@ -3302,8 +3317,7 @@ descendtree:
 	ret
 
 .readdirnofixbad:		; We can't recover from skipping this one
-	mov	al, error_nofix
-	jmp	exit
+	jmp	exit_nofix
 	; Routine for repairing bad sector in directory
 .readdirbadsector:
 	mov	cx, state_dir
@@ -3637,8 +3651,7 @@ alloccluster:
 	call	scanbitsclust
 	mov	dx, msg_outofspace
 	call	outstring
-	mov	al, error_nofix
-	jmp	exit
+	jmp	exit_nofix
 .found	cmp	dx, [highestclust + 2]	; When scanning for zeros, scanbitsclust can return
 	jb	.found2			; a few cells too many. Don't try to allocate them.
 	ja	.never
@@ -3813,8 +3826,7 @@ recoverdirs:
 	call	queryrecovercommon
 	cmp	al, 'y'
 	je	.rec
-	mov	al, error_nofix
-	jmp	exit		; Attempting to continue would make hash of things.
+	jmp	exit_nofix		; Attempting to continue would make hash of things.
 .rec	call	mklostfnd
 	mov	[bp - 10], dx
 	mov	[bp - 12], ax
@@ -4181,8 +4193,7 @@ mkdirentry:
 	call	outstring
 	mov	dx, msg_goodenuf
 	call	outstring
-	mov	al, error_nofix
-	jmp	exit
+	jmp	exit_nofix
 
 .mkentry_clust:
 	mov	ax, [bytespersector]
@@ -4532,12 +4543,10 @@ incrementprogress:	; DI=pointer to total, destroys nothing
 	jne	.p
 	mov	dl, ' ' - '0'
 .p	add	dl, '0'
-	mov	ah, 2
-	int	21h
+	call	outchar
 	mov	dl, dh
 	add	dl, '0'
-	mov	ah, 2
-	int	21h
+	call	outchar
 	mov	dx, out_percentpost
 	call	outstring
 	pop	bp
@@ -4815,6 +4824,7 @@ scanbitsclust:
 	jnz	.mid
 	pop	di
 .mide	mov	bx, [bp - 4]
+	add	di, bx
 	call	.inner
 .cont	add	si, bitvectorrlen
 	cmp	si, bitvectorptrs + bitvectorrlen * 128
@@ -4873,11 +4883,11 @@ scanbitsclust:
 	sbb	bx, [si + 8]
 	call	.div4ceil	; 4 entries per byte
 	mov	es, [si + 4]	; bx got set to 0 by the above, a cache line can't be > 32K in size
-	pop	si		; get record selected back
-	call	.inner
+	call	.inner		; since bx is 0, length = end
 	jnc	.nfwb
 	or	[si], byte 1
-.nfwb	cmp	dx, [bp - 10]
+.nfwb	pop	si		; get record selected back
+	cmp	dx, [bp - 10]
 	jb	.xmsnxt
 	ja	.xmslst
 	cmp	ax, [bp - 12]
@@ -5137,8 +5147,7 @@ validatehddescriptor:
 .ret	ret
 .error	mov	dx, msg_hdbaddesc
 	call	outstring
-	mov	al, error_nofix
-	jmp	exit
+	jmp	exit_nofix
 
 ; Checks for end chain, handles somebody saying "no" to fix out of range entry in FAT
 isendchainagnostic:
@@ -5392,8 +5401,20 @@ checkmark:	; Displays a checkmark
 %else
 	mov	dx, out_check	; In release, we are free to clobber AX and DX
 %endif
-outstring:	; Outputs $ terminated string in DS:X (DOS call)
+outstring:	; Outputs $ terminated string in DS:DX (DOS call)
 	mov	ah, 9
+	int	21h
+	ret
+
+outchar:	; Outputs DL (DOS call)
+	push	bp		; Defense against DOS calling buggy BIOS
+	mov	ah, 2
+	int	21h
+	pop	bp
+	ret
+
+inchar:		; Input key no echo (DOS call)
+	mov	ah, 7
 	int	21h
 	ret
 
@@ -5418,8 +5439,7 @@ diskwrite:
 	ret
 .bad	mov	dx, msg_replace
 	call	outstring
-	mov	al, error_nofix
-	jmp	exit
+	jmp	exit_nofix
 
 	; Reads sector to buffer if not already in buffer; trashes BX, CX, SI, DI
 	; CF is set on error
@@ -5647,10 +5667,11 @@ reservednames	db	"AUX     "
 		db	0
 lostfnd		db	"LOST    FND"
 
-msg_usage	db	'SSDSCAN alpha4', 13, 10
+msg_usage	db	'SSDSCAN beta1', 13, 10
 		db	'Copyright (C) Joshua Hudson 2024-2026', 13, 10
 		db	'Usage: SSDSCAN DRIVE: [/F] [/C] [/D] [/B] [/Z]', 13, 10
 		db	'/F   Fix errors without prompting', 13, 10
+		db	'/T   Test only: fix nothing', 13, 10
 		db	'/C   Check chain length against file length & check for cycles', 13, 10
 		db	'/B   Retest clusters currently marked bad', 13, 10
 		db	'/Z   Recovery directories that have zeroed sectors in the middle', 13, 10
@@ -5698,6 +5719,8 @@ msg_noboot	db	'Failed to find a valid boot sector', 13, 10, '$'
 msg_badmdesc	db	'Encountered a bad sector trying to read media descriptor.', 13, 10
 msg_nomdesc	db	"Media Descriptor does not correspond to boot sector.", 13, 10, "Most likely this isn't a FAT filesystem after all.", 13, 10, '$'
 msg_badroot	db	"Root cluster out of range.", 13, 10, '$'
+msg_dirdmgt	db	" is marked as a directory but has a damaged initial sector", 13, 10
+		db	" and repairs are disabled during this run.", 13, 10, '$'
 query_bootsect	db	"Boot sector damaged, however a backup boot sector was found. Restore it?$"
 query_fatdiff	db	"FATs disagree, repair with best guess?$"
 query_anomalous	db	"Anomalous record in FAT, repair?$"
@@ -5847,10 +5870,12 @@ opflag_d	equ 4
 opflag_b	equ 8
 opflag_z	equ 16
 opflag_x	equ 32
+opflag_t	equ 64
 opflag2_bigdisk	equ 1
 opflag2_7305	equ 2
 opflag2_ebpb	equ 4
 opflag2_rclust	equ 8
+opflag2_nofix	equ 16
 opflag2_sbcpin	equ 32
 opflag2_ulink	equ 64
 opflag2_a20	equ 128
