@@ -1736,7 +1736,7 @@ stage_finalize:
 .done	call	newline
 	mov	al, 0
 	test	[opflags + 1], byte opflag2_nofix
-	jne	exit
+	jz	exit
 exit_nofix:
 	mov	al, error_nofix
 exit:	mov	ah, 4Ch
@@ -2179,11 +2179,11 @@ descendtree:
 .rootstart:
 	mov	[es:si + 4], ax	; Current cluster of directory
 	mov	[es:si + 6], dx
-	push	ax
-	push	dx
-	call	invalidatesector	; ES is not sector data
-	pop	dx
-	pop	ax
+	;push	ax			; We don't have to do this right now
+	;push	dx			; because caching of 3 and 4 is disabled already
+	;call	invalidatesector	; ES is not sector data
+	;pop	dx
+	;pop	ax
 	mov	di, 2		; Skip initial . and ..
 	cmp	[bp - 22], word 1
 	jne	.start_isnotroot
@@ -2222,6 +2222,7 @@ descendtree:
 
 	div	word [bp - 4]
 	mov	di, dx	; Entry within chunk
+	mul	word [sectsperchunk]
 
 	; Read root directory entry
 	mov	bx, [rootdirentries]
@@ -2705,12 +2706,11 @@ descendtree:
 	mov	[bp - 16], ax
 	mov	[bp - 14], dx
 	mov	[bp - 12], bx
-.scannormal_enddirstate:
 	mov	[bp - 26], byte 8
 	test	[opflags], byte opflag_t
-	jz	.scannormal_enddirstate_out
+	jz	.scannormal_enddirectory_out
 	mov	[bp - 26], byte 14
-.scannormal_enddirstate_out:
+.scannormal_enddirectory_out:
 	jmp	.skipentry
 .scannormal_toodeep:
 	mov	dx, msg_toodeep
@@ -3281,6 +3281,7 @@ descendtree:
 	push	dx
 	mov	cl, 0
 .out_el	mov	dl, [bx]
+%ifndef SEVENBIT
 	test	cl, cl
 	jnz	.out_en0
 	cmp	dl, 05h
@@ -3297,6 +3298,12 @@ descendtree:
 	je	.out_en0a
 	cmp	dl, 13
 	jne	.out_en0b
+%else
+	cmp	dl, 32
+	jb	.out_en0a
+	cmp	dl, 127
+	jb	.out_en0b
+%endif
 .out_en0a:
 	mov	dl, '?'
 .out_en0b:
@@ -5691,7 +5698,11 @@ state_media	db	        'Media Descriptor     : $'
 state_fat	db	13, 10, 'File Allocation Table: $'
 state_dir	db	13, 10, 'Directory Structure  : $'
 out_cr		db	13, '$'
+%ifndef SEVENBIT
 out_check	db	251, "  $"
+%else
+out_check	db	"OK $"
+%endif
 out_percentpost	db	'%', 8, 8, 8, '$'
 dsc_bps		db	13,     'Bytes per sector           : '
 dsc_spc		db	13, 10, 'Sectors per cluster        : '

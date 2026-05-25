@@ -28,6 +28,7 @@ ebrdepth	equ	104
 
 _start:
 	jmp	main
+shiftno	db	0
 
 usage:
 	mov	dx, .message
@@ -40,7 +41,7 @@ usage:
 	db	"Only raw disk access to the drive letter should be used.", 13, 10
 	db	"Copyright (C) Joshua Hudson 2025-26", 13, 10
 	db	"Usage: REMAP25 [/C|/L] disk", 13, 10
-	db	"Usage: REMAP25 [/C|/L] disk partition Z: A:\SSDSCAN.COM Z: options", 13, 10, '$'
+	db	"Usage: REMAP25 [/C|/L[:shift]] disk partition Z: A:\SSDSCAN.COM Z: options", 13, 10, '$'
 
 error	db	"EXEC failed", 13, 10, '$'
 diskerr	db	"Disk Error", 13, 10, '$'
@@ -414,6 +415,8 @@ main:
 .p1	lodsb
 	cmp	al, ' '
 	je	.p1
+	cmp	al, 9
+	je	.p1
 	cmp	al, '/'
 	jne	.nopt
 	lodsb
@@ -427,6 +430,15 @@ main:
 	je	.ochs
 .uv	jmp	usage
 .olba	mov	[type], byte 'L'
+	cmp	[si], byte ':'
+	jne	.lobax
+	inc	si
+.lobax	cmp	[si], byte '0'
+	jb	.p1
+	cmp	[si], byte '9'
+	ja	.p1
+	call	readnumber
+	mov	[shiftno], bl
 	jmp	.p1
 .ochs	mov	[type], byte 'C'
 	jmp	.p1
@@ -533,6 +545,9 @@ havepart:
 .huge	mov	[limit], ax
 	mov	[limit + 2], dx
 programbuilder:
+	mov	ah, 0Dh		; Don't mess things up if the user mapped it
+	int	21h		; over the damaged drive they're trying to check.
+	mov	bl, [shiftno]
 	mov	di, programstart
 	mov	si, error
 	mov	cx, fcbbase - error
@@ -561,12 +576,34 @@ programbuilder:
 	mov	[vector2], ax
 	mov	[vector2 + 2], dx
 	mov	si, int26entry
+	cmp	bl, 0
+	jne	.shift
 	mov	cx, chsdiskaccess - int26entry
 	rep	movsb
-	cmp	[type], byte 'L'
+	jmp	.pshift
+.shift	mov	cx, int2526add - int26entry
+	rep	movsb
+	mov	si, shiftprefix
+	mov	cx, shiftdrive - shiftprefix
+	rep	movsb
+	push	bx
+.shiftl	mov	si, shiftdrive
+	mov	cx, shiftdrive_end - shiftdrive
+	rep	movsb
+	dec	bl
+	jnz	.shiftl
+	pop	bx
+	mov	si, int2526add
+	mov	cx, chsdiskaccess - int2526add
+	rep	movsb
+.pshift	cmp	[type], byte 'L'
 	jne	.chs
 	mov	si, lbadiskaccess
 	mov	cx, lbadiskaccess.end - lbadiskaccess
+	cmp	bl, 0
+	je	.acc
+	mov	si, lbadiskaccess.shift
+	mov	cx, lbadiskaccess.end - lbadiskaccess.shift
 	jmp	.acc
 .chs	mov	si, chsdiskaccess
 	mov	cx, chsdiskaccess.end - chsdiskaccess
@@ -622,6 +659,14 @@ stpcpy:
 	jne	stpcpy
 	ret
 
+shiftprefix:
+	mov	di, 0
+shiftdrive:
+	shl	ax, 1
+	rcl	dx, 1
+	rcl	di, 1
+shiftdrive_end:
+
 ; INT 25 and 26 are allowed to trash everything but SS, SP and return with retf
 int25entry:
 	cmp	al, [cs:logdisk]
@@ -662,6 +707,7 @@ int2526common:
 	retf
 .lg	cmp	cx, 255
 	ja	.cb
+int2526add:
 	add	ax, [offset]
 	adc	dx, [offset + 2]
 
@@ -698,7 +744,7 @@ chsdiskaccess:
 
 lbadiskaccess:
 	mov	di, 0		; Yup; handle 2TB part at end of 2TB MBR,
-	adc	di, 0		; blowing completely past the limit
+.shift	adc	di, 0		; blowing completely past the limit
 	mov	si, lbadapsize
 	mov	[si], word 10h
 	mov	[si + 2], cx

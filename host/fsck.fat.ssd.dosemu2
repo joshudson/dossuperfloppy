@@ -1,0 +1,76 @@
+#!/bin/sh
+
+ipath=/usr/share/fsck.fat.ssd
+optbuilder=""
+while :
+do
+	case $1 in
+	--help)	echo "Usage: fsck.fat.ssd.dosemu2 [options] filesystem"
+		echo "-y   Fix errors without prompting"
+		echo "-n   Test only: fix nothing"
+		echo "-c   Check chain length against file length & check for cycles"
+		echo "-b   Retest clusters currently marked bad"
+		echo "-z   Recovery directories that have zeroed sectors in the middle"
+		echo "     (caution: 0 is normally the directory terminator; can damage FS instead)"
+		echo "-x   Reserves the capacity to use /Z later"
+		echo "-d   Describe filesystem"
+		exit 0 ;;
+	--path)	shift ; ipath="$1" shift ;;
+	--)	shift ; break ;;
+	-*)	s="$1"
+		while [ -n "$s" ]
+		do
+			opt="${s%${s#?}}"
+			case "$opt" in
+			-) ;;
+			a) optbuilder="$optbuilder /F" ;;
+			y) optbuilder="$optbuilder /F" ;;
+			p) optbuilder="$optbuilder /F" ;;
+			n) optbuilder="$optbuilder /T" ;;
+			c) optbuilder="$optbuilder /C" ;;
+			z) optbuilder="$optbuilder /Z" ;;
+			x) optbuilder="$optbuilder /X" ;;
+			d) optbuilder="$optbuilder /D" ;;
+			B) optbuilder="$optubilder /B" ;;
+			*) echo "Invalid option $opt" 1>&2 ; exit 16 ;;
+			esac
+			s="${s#?}"
+		done
+		shift ;;
+	*)	break ;;
+	esac
+done
+if [ -z "$1" ]
+then	echo "Usage: fsck.fat.ssd.dosemu2 [-options] device"
+	exit 16
+fi
+
+cleanup()
+{
+	rm -f $SCRATCH/dosemu.conf $SCRATCH/device
+	rmdir $SCRATCH
+	exit $1
+}
+
+SCRATCH=""
+if mkdir /run/$$.fsck 2>/dev/null
+then SCRATCH=/run/$$.fsck
+elif mkdir /tmp/$$.fsck
+then SCRATCH=/tmp/$$.fsck
+else exit 8
+fi
+trap 'cleanup' 1 2 3 TERM
+ln -s "$(realpath $1)" $SCRATCH/device || cleanup 8
+if ! [ -f $SCRATCH/device ] || [ -b $SCRATCH/device ]
+then	echo "$1: Not a device" 1>&2
+	cleanup 16
+fi
+cat > $SCRATCH/dosemu.conf <<!
+\$_speaker="off"
+\$_sound="off"
+\$_hdimage="/usr/share/comcom64:ro /usr/share/dosemu/commands:ro $ipath:ro $SCRATCH/device"
+!
+cat $SCRATCH/dosemu.conf
+(exec /usr/libexec/dosemu2/dosemu2.bin -n -f $SCRATCH/dosemu.conf -td -E "E:\\REMAP25.COM/L 4 1 Z: E:\\SSDSCAN.COM Z:$optbuilder"
+ exit 128)
+cleanup $?
