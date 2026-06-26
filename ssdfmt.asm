@@ -2747,9 +2747,8 @@ procmbrnbc:
 	cmp	cx, 0FFFFh
 	jne	.chs
 .lba	mov	di, 0602h
-	mov	ah, 0
 	mov	[di], word 10h
-	mov	[di + 2], ax
+	mov	[di + 2], word 1
 	mov	[di + 4], bx
 	mov	[di + 6], es
 	mov	cx, [si + 8]
