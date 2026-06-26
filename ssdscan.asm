@@ -77,7 +77,7 @@ _start:
 	jae	.mem
 .nomem	mov	dx, msg_nocmem
 	call	outstring
-	mov	ax, 4C04h			; We can *NOT* jump to exit here; this will trash DOS
+	mov	ax, 4C08h			; We can *NOT* jump to exit here; this will trash DOS
 	int	21h				; as the exit-free memory is unintialized
 .mem	mov	sp, stackbottom	
 	sub	bx, (stackbottom) / 16
@@ -166,7 +166,7 @@ _start:
 	mov	cx, 0847h
 	int	21h
 .sflag:	mov	ah, 0Dh
-	int	21h		; Flush all buffers: we want a cleanly written FS.
+	int	21h		;Flush all buffers: we want a cleanly written FS.
 
 stage_media_descriptor:
 	mov	dx, state_media
@@ -177,6 +177,22 @@ stage_media_descriptor:
 	mov	[sectsperchunk], word 1
 
 	xor	ax, ax
+%ifdef FIXED_SECTOR_SIZE
+	xor	dx, dx
+	xor	bx, bx
+	call	diskread
+	jnc	.read0
+.error0	xor	dx, dx
+	xor	bx, bx
+	xor	ax, ax
+	call	diskread
+	jnc	.read0
+	call	outax
+.errorZ	mov	dx, msg_error0
+.errorx	call	outstring
+	jmp	exit_nofix
+.read0	mov	[bytespersector], 512
+%else
 	; Get disk sector size
 	; Documentation says I can use DOS function 1BH for this, but if the boot sector is trashed that won't work.
 	; DOS must have for a source for this information.
@@ -193,7 +209,6 @@ stage_media_descriptor:
 	call	diskread
 	jnc	.read0
 .error0	xor	dx, dx
-	xor	cx, cx
 	xor	bx, bx
 	xor	ax, ax
 	call	diskread
@@ -237,6 +252,7 @@ stage_media_descriptor:
 .szfin	cmp	ax, 256
 	jb	.errorZ			; Smallest handled sector size is 256 bytes
 	mov	[bytespersector], ax
+%endif
 
 	xor	ax, ax
 .mloop	push	ax
@@ -1559,8 +1575,8 @@ stage_fat:
 
 	;Advance loop
 .advanceblockloop:
-	mov	ah, 0Bh		; Checks for ^C as INT 25h doesn't
-	int	21h
+	mov	ah, 0Bh
+	int	21h		; Checks for ^C as INT 25h doesn't
 	mov	ax, [bp - 6]
 	mov	dx, [bp - 4]
 	add	ax, [bp - 18]
@@ -1739,7 +1755,8 @@ stage_finalize:
 	jz	exit
 exit_nofix:
 	mov	al, error_nofix
-exit:	mov	ah, 4Ch
+exit:
+	mov	ah, 4Ch
 	push	ax
 	cmp	[savedaccessflag], word 0
 	jne	.nac
@@ -2275,8 +2292,8 @@ descendtree:
 	call	outstring
 	jmp	exit_nofix
 .postreaddirbadsector:			; means after the bad sector check on readdir
-	mov	ah, 0Bh			; Checks for ^C as INT 25h doesn't
-	int	21h
+	mov	ah, 0Bh
+	int	21h			; Checks for ^C as INT 25h doesn't
 
 	mov	bx, [bp - 26]
 	mov	ax, [descendtreetable + bx]
@@ -4798,7 +4815,7 @@ scanbitsclust:
 	xor	dx, dx
 	mov	ax, 2
 	mov	cl, 4
-	shl	ch, cl		; We start at 2
+	shl	ch, cl			; We start at 2
 	mov	[bp - 6], byte 0
 	test	[opflags + 1], byte opflag2_sbcpin
 	jnz	.outer

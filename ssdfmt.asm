@@ -124,6 +124,48 @@ _start:
 	xor	ax, ax
 	mov	[lvolumeserial], ax
 	mov	[lvolumeserial + 2], dx
+	mov	[passeddisk], ax
+	mov	[passeddisk + 2], ax
+	call	detectdos
+	push	ds
+	pop	es
+	jz	.nargs
+	push	ds
+	mov	ax, ds
+	sub	ax, 10h
+	mov	ds, ax
+	mov	si, 81h
+	mov	[si + 80h], byte 13
+	mov	di, passeddisk
+.loop	lodsb
+	cmp	al, '0'
+	jb	.lchk
+	cmp	al, '9'
+	ja	.ochk
+	cmp	di, passedmdos
+	ja	.lchk
+	stosb
+	jmp	.lchk
+.ochk	and	al, 0DFh
+	cmp	al, 'Y'
+	jne	.ny
+	or	[es:passedopts], byte 1
+.ny	cmp	al, 'O'
+	jne	.no
+	or	[es:passedopts], byte 4
+.no	cmp	al, 'F'
+	jne	.nf
+	or	[es:passedopts], byte 16
+.nf	cmp	al, 'R'
+	jne	.nr
+	or	[es:passedopts], byte 32
+.nr	cmp	al, 'X'
+	jne	.lchk
+	or	[es:passedopts], byte 128
+.lchk	cmp	al, 13
+	jne	.loop
+	pop	ds
+.nargs:
 
 	; Enumerate disks
 	mov	dl, 80h
@@ -352,25 +394,45 @@ mainscreen:
 	inc	dx
 	jmp	.nextdiskdraw
 .lastdiskdrawn:
-	mov	bh, 0
 	mov	dh, dl
 	mov	dl, 6
 	add	dh, 2
-	mov	ah, 02h
-	int	10h
+	push	dx
+	mov	si, s_bootc
+	mov	cx, 15
+	call	out_stringat
+	mov	si, s_on
+	test	[passedopts], byte 4
+	jz	.bcon
+	mov	si, s_off
+.bcon	mov	cx, 3
+	call	out_string
+	pop	dx
+	inc	dh
 	mov	si, s_esc
 	mov	cx, 9
-	call	out_string
+	call	out_stringat
 
 keyboarddisk:
-	mov	ah, 0
+	mov	al, [passeddisk]
+	test	al, al
+	jz	.keyb
+	mov	[passeddisk], byte 0
+	jmp	.kid
+.keyb	mov	ah, 0
 	int	16h
 	cmp	al, 27
 	jne	.notxit
 	jmp	exit
-.notxit	cmp	al, '1'
+.notxit	cmp	al, 'B'
+	je	.bc
+	cmp	al, 'b'
+	jne	.notbc
+.bc	xor	[passedopts], byte 4
+	jmp	mainscreen
+.notbc	cmp	al, '1'
 	jb	keyboarddisk
-	mov	dl, [numdisks]
+.kid	mov	dl, [numdisks]
 	add	dl, '0'
 	cmp	al, dl
 	ja	keyboarddisk
@@ -400,6 +462,10 @@ havedisk:
 	cmp	[es:bx + 1EEh + 4], byte 0
 	jne	short .novrchk
 .ovrchk:
+	mov	al, [passedopts]
+	and	[passedopts], byte 0FEh
+	test	al, byte 1
+	jnz	.novrchk
 	push	ds
 	pop	es
 	push	dx
@@ -494,10 +560,14 @@ havedisk:
 	mov	dx, 101Bh
 	mov	si, s_16384
 	call	out_stringat
+	mov	al, [passedssize]
+	mov	[passedssize], byte 0
+	test	al, al
+	jnz	.kis
 .koops	mov	ah, 0
 	int	16h
 	mov	bx, 512
-	cmp	al, '5'
+.kis	cmp	al, '5'
 	je	.ksize
 	mov	bx, 1024
 	cmp	al, '1'
@@ -564,11 +634,15 @@ havedisk:
 	mov	dx, 101Bh
 	mov	si, s_flba
 	call	out_stringat
+	mov	al, [passedmdos]
+	mov	[passedmdos], byte 0
+	test	al, al
+	jnz	.kid
 .koops2	mov	ah, 0
 	int	16h
 	cmp	al, 27
 	je	.kesc
-	cmp	al, '1'
+.kid	cmp	al, '1'
 	jb	.koops2
 	cmp	al, '6'
 	ja	.koops2
@@ -1045,6 +1119,8 @@ applyentry:
 	call	progressal_base
 	mov	[rebootmsg], byte 1
 	test	[diskebr], byte 1		; CF = 0
+	jnz	.ebrnc
+	test	[passedopts], byte 4
 	jnz	.ebrnc
 	call	writebootcheck
 .ebrnc	pop	es
@@ -1840,9 +1916,17 @@ patchsuperblockmbr:
 	rep	stosw
 	mov	si, procmbr		; MBR boot routine
 	mov	cx, (procmbr.end - procmbr) / 2
-	rep	movsw
+	test	[passedopts], byte 4
+	jz	.wbcl
+	mov	si, procmbrnbc		; MBR boot routine
+	mov	cx, (procmbrnbc.end - procmbrnbc) / 2
+.wbcl	rep	movsw
+	mov	cx, 0198h		; Zero fill
+	sub	cx, di			; (erases some nonsense)
+	shr	cx, 1
+	rep	stosw
 	mov	si, s_rderr		; MBR boot messages
-	mov	di, 0198h
+	;mov	di, 0198h		; di is already 0198h
 	mov	cx, 13
 	rep	movsw
 	xor	ax, ax			; Zero the rest of the stuff
@@ -1873,6 +1957,8 @@ patchsuperblockmbr:
 	mov	[es:1BEh + 5], dh
 	mov	[es:1BEh + 6], cx
 	; Write MBR pointer to boot check
+	test	[passedopts], byte 4
+	jnz	.nbch
 	xor	si, si
 	mov	cx, [minclustsizem]
 	cmp	[disklba], byte 0
@@ -1894,7 +1980,7 @@ patchsuperblockmbr:
 	call	lineartochs
 	mov	[es:1CEh + 5], dh
 	mov	[es:1CEh + 6], cx
-	mov	[es:1FDh], byte 0
+.nbch	mov	[es:1FDh], byte 0
 	jmp	.final
 
 .ebr	mov	ax, [es:1Ch]	; Save distance to partition start
@@ -2221,7 +2307,11 @@ getleadingsectors:
 	test	[diskebr], byte 1
 	jnz	.ebr
 .first	xor	cx, cx
-	mov	bx, [minclustsize]
+	test	[passedopts], byte 4
+	jne	.hbc
+	mov	bx, [minclustsizem]
+	jmp	.off
+.hbc	mov	bx, [minclustsize]
 	cmp	bx, 1024
 	jbe	.six
 	mov	bl, bh	; We need twice the number of 2048 byte units so divide by 256
@@ -2444,6 +2534,8 @@ diskerror:
 afterfat:
 	cmp	[disk], byte 80h
 	jbe	.msr
+	test	[passedopts], byte 32
+	jnz	.msr
 	mov	es, [blockseg]
 	xor	bx, bx
 	mov	dx, 80h
@@ -2461,7 +2553,9 @@ afterfat:
 	add	di, 16
 	loop	.scan
 .msr	jmp	mainscreenreturnes
-.found	mov	bl, 9
+.found	test	[passedopts], byte 16
+	je	.y
+	mov	bl, 9
 	mov	ax, 091Ah
 	mov	cx, 041Ah
 	call	draw_box
@@ -2528,6 +2622,8 @@ mainscreenreturnes:
 	push	ds
 	pop	es
 mainscreenreturn:
+	test	[passedopts], byte 128
+	jnz	exit
 	mov	bx, 7
 	mov	cx, 78
 	mov	dx, 0101h
@@ -2542,7 +2638,7 @@ mainscreenreturn:
 
 ;Exit - waay down here to keep from being overwritten by bios reboot routine
 exit:
-%if 0
+%ifndef DEBUG
 	;Clear screen on way out
 	mov	bx, 7
 	mov	cx, 80
@@ -2620,17 +2716,76 @@ procmbreloc:
 	mov	di, 06E0h
 	mov	cx, 90h
 	rep	movsw
-	mov	bp, 06E0h + procmbr.normal - procmbr
 	test	dl, 80h		; Check if DL is sane
 	jnz	.keep
 	mov	dl, 80h
-.keep	jmp	0:06E0h
+.keep	mov	si, 07BEh	; One last common instruction before procmbr and procmbrnbc diverge
+	jmp	0:06E0h
 	align	2, db 0
 procmbreloc.end:
 
+procmbrnbc:
+.srch	test	[si], byte 80h
+	jnz	.found
+	add	si, 16
+	cmp	si, 07FEh
+	jb	.srch
+	int	18h		; Try next boot path
+	mov	si, 0798h + 14
+	mov	cx, 12
+	jmp	.msg
+.found	mov	bx, 7C00h
+	mov	dh, [si + 1]
+	mov	cx, [si + 2]
+	mov	ah, [si + 4]
+	cmp	ah, byte 0Ch
+	je	.lba
+	cmp	ah, byte 0Eh
+	je	.lba
+	cmp	dh, 0FEh
+	jb	.chs
+	cmp	cx, 0FFFFh
+	jne	.chs
+.lba	mov	di, 0602h
+	mov	ah, 0
+	mov	[di], word 10h
+	mov	[di + 2], ax
+	mov	[di + 4], bx
+	mov	[di + 6], es
+	mov	cx, [si + 8]
+	mov	[di + 8], cx
+	mov	cx, [si + 10]
+	mov	[di + 10], cx
+	xor	cx, cx
+	mov	[di + 12], cx
+	mov	[di + 14], cx
+	push	si
+	mov	si, di
+	mov	ah, 42h
+	int	13h
+	pop	si
+	jmp	.chki
+.chs	mov	ax, 0201h
+	int	13h
+.chki	jc	.error
+	jmp	bx
+.error	mov	si, 0798h
+	mov	cx, 14
+.msg	mov	bx, 7
+.msglp	lodsb
+	mov	ah, 0Eh
+	int	10h
+	loop	.msglp
+	mov	ah, 0
+	int	16h
+	cli
+	jmp	0F000h:0FFF0h	; Reboot
+align	2, db 0
+procmbrnbc.end:
+
 procmbr:
 	mov	al, 3
-	mov	si, 07BEh
+	mov	bp, 06E0h + procmbr.normal - procmbr
 .srch1	mov	ah, [si + 4]
 	cmp	ah, byte 0B0h
 	je	.found
@@ -2660,8 +2815,8 @@ procmbr:
 	je	.lba
 	cmp	ah, byte 0Eh
 	je	.lba
-	cmp	dh, 0FFh
-	jne	.chs
+	cmp	dh, 0FEh
+	jb	.chs
 	cmp	cx, 0FFFFh
 	jne	.chs
 .lba	mov	di, 0602h
@@ -2669,7 +2824,7 @@ procmbr:
 	mov	[di], word 10h
 	mov	[di + 2], ax
 	mov	[di + 4], bx
-	mov	[di + 6], ds
+	mov	[di + 6], es
 	mov	cx, [si + 8]
 	mov	[di + 8], cx
 	mov	cx, [si + 10]
@@ -3440,6 +3595,9 @@ bootcheck_end:
 
 s_name	db	0B5h, ' SSD Format ', 0C6h
 s_vsn	db	'1.8b'		; should start with v but this is unreleased checkpoint
+s_bootc	db	'B)  Boot check:'
+s_on	db	'ON '
+s_off	db	'OFF'
 s_nomem	db	'Not enough RAM'
 s_disk	db	'format disk '
 s_mb	db	' MB'
@@ -3477,8 +3635,7 @@ s_rebootmsg	db	'Reboot DOS to reread partition table', 13, 10, '$'
 
 align	4, db 0
 
-;DEBUG
-%if 1
+%ifdef DEBUG
 debug_dumpregs:
 	push	sp
 	push	bp
@@ -3568,7 +3725,11 @@ usabledisksize2	equ	bss + 96	; Size = 4 bytes, amount usable for the entire disk
 maxclusters	equ	bss + 100	; Size = 4 bytes, maximum number of clusters permitted by RAM (disk check)
 ebrbasis	equ	bss + 104	; Parameter from mkall to patchsuperblockmbr
 lvolumeserial	equ	bss + 108	; Size = 4 bytes, last volume serial number generated
-fat32spill	equ	bss + 112	; Size is currently 2 bytes
+passeddisk	equ	bss + 112	; Argument: disk
+passedssize	equ	bss + 113	; Argument: sector size
+passedmdos	equ	bss + 114	; Argument: min dos
+passedopts	equ	bss + 115	; bit 0 = Y, bit 2 = omit disk check
+fat32spill	equ	bss + 116	; Size is currently 2 bytes
 
 highmemoryreserve	equ	192 - 32	; DOS kernel high + command line history eats into high memory
 
