@@ -196,9 +196,7 @@ nextdisk:
 	cmp	cl, 0C0h
 	pop	cx
 	jz	.fadj		; Maxxed
-.chkadj	push	ax
-	push	bx
-	push	dx
+.chkadj	push	dx
 	push	cx
 	push	bp
 	mov	bp, sp
@@ -216,10 +214,9 @@ nextdisk:
 	pop	bp
 	pop	cx
 	pop	dx
-	pop	bx
-	pop	ax
 	; Save CHS disk info to table
 .fadj	mov	[di], word 512		; CHS must be 512 bytes per sector
+	mov	ah, 0
 	mov	al, dh
 	inc	ax
 	mov	[di + 4], ax
@@ -535,6 +532,8 @@ havedisk:
 	cmp	di, word 16384
 	je	.n16384
 	mov	ah, 0FEh
+	mov	cx, di
+	xor	dx, dx
 	jmp	diskerror	; int13h is bugged!
 .n512	mov	cx, 12
 	mov	dx, 0B1Bh
@@ -1046,6 +1045,9 @@ applyentry:
 	cmp	al, 32
 	je	.mkfat32fs
 	mov	ah, 7Fh
+	mov	cl, al
+	mov	ch, 0
+	xor	dx, dx
 	stc
 .error	pop	es
 	ret
@@ -2515,21 +2517,42 @@ diskclearlast:
 
 diskerror:
 	;Erase screen except for progress bar
-	push	ax
+	test	[disklba], byte 1
+	jz	.chs
+	mov	cx, [si + 10]
+	mov	dx, [si + 8]
+.chs	mov	[fat32spill], cx
+	mov	[fat32spill + 2], dx
+	mov	si, [s_derr + 10]
+	call	.xreg8
+	inc	si
+	mov	ax, [fat32spill]
+	call	.xreg8
+	mov	ah, al
+	call	.xreg8
+	inc	si
+	mov	ax, [fat32spill + 2]
+	call	.xreg8
+	mov	ah, al
+	call	.xreg8
+	mov	bx, 7
+	mov	si, s_derr
+	mov	cx, 22
+	mov	dx, 161Bh
+	call	out_stringat
+	jmp	mainscreenreturn
+.xreg8	push	ax
 	and	ah, 15
 	call	xdigit
-	mov	[s_derr + 11], ah
+	mov	[si + 1], ah
 	pop	ax
 	mov	cl, 4
 	shr	ah, cl
 	call	xdigit
-	mov	[s_derr + 10], ah
-	mov	bx, 7
-	mov	si, s_derr
-	mov	cx, 12
-	mov	dx, 1622h
-	call	out_stringat
-	jmp	mainscreenreturn
+	mov	[si], ah
+	inc	si
+	inc	si
+	ret
 
 afterfat:
 	cmp	[disk], byte 80h
@@ -3625,7 +3648,7 @@ s_dos33	db	'3) MS-DOS 3.31'
 s_dos4	db	'4) MS-DOS 4.01'
 s_952	db	'5) Win 95 OSR2'
 s_flba	db	'6) Force LBA (95 OSR2)'
-s_derr	db	'SSD Error   '
+s_derr	db	'SSD Error xx xxxx xxxx'
 s_sysc	db	'Run SYS C: first. Press any key to reboot.'
 s_nbebr	db	'Impossible to boot an EBR by normal means.'
 s_rderr	db	'SDD Read Error'
@@ -3728,7 +3751,7 @@ passeddisk	equ	bss + 112	; Argument: disk
 passedssize	equ	bss + 113	; Argument: sector size
 passedmdos	equ	bss + 114	; Argument: min dos
 passedopts	equ	bss + 115	; bit 0 = Y, bit 2 = omit disk check
-fat32spill	equ	bss + 116	; Size is currently 2 bytes
+fat32spill	equ	bss + 116	; Size is currently 4 bytes
 
 highmemoryreserve	equ	192 - 32	; DOS kernel high + command line history eats into high memory
 
