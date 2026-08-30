@@ -662,6 +662,7 @@ stpcpy:
 shiftprefix:
 	mov	di, 0
 shiftdrive:
+	shl	cx, 1
 	shl	ax, 1
 	rcl	dx, 1
 	rcl	di, 1

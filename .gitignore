@@ -3,6 +3,8 @@
 *.SYS
 *.16
 *.32
+*.bin
+*.BIN
 *.img
 *.IMG
 *.iso
