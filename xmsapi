@@ -154,7 +154,7 @@ Returns: AX=0001h if the block is locked, 0000h otherwise.
 Errors: BL=80h if the function is not implemented
 	BL=81h if a VDISK driver is detected
 	BL=82h if an A20 error occurs
-	BL=A2h if the handel is invalid
+	BL=A2h if the handle is invalid
 	BL=ACh if the block's lock count overflows
 	BL=ADh if the lock fails
 
@@ -182,7 +182,7 @@ Returns: AX=0001h if the block's information is found, 0000h otherwise
 	DX=The block's length in kilobytes
 Errors: BL=80h if the function is not implemented
 	BL=81h if a VDISK driver is detected
-	BL=A2h if the handel is invalid
+	BL=A2h if the handle is invalid
 
 call AH=0Fh		Rellocate Extended Memory Block
 Args: BX=new size of the block
