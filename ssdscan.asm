@@ -55,8 +55,8 @@ stackbottom	equ	(_endbss - _bss + _end - _start + 100h + 768)
 ; cs:_endbss  top of stack
 ; buf1seg:0   first FAT buffer
 ; buf2seg:0   second FAT buffer and cluster data buffer
-; buf3seg:0   third FAT buffer, if we need it
-; buf4seg:0   working buffer (FAT sort and dirwalk)
+; buf3seg:0   third FAT buffer or FAT sort if two FATS
+; buf4seg:0   working buffer (FAT sort if 3 FATS and dirwalk)
 ; bitbufseg:0 bitmap buffer, if it needs to exist
 ; xmspinseg:0 second bitmap buffer, if it needs to exist
 ;             bitmap pool in main memory (computed once)
@@ -127,6 +127,8 @@ _start:
 	je	.o6
 	cmp	al, 'T'
 	je	.o7
+	cmp	al, 'S'
+	je	.o8
 	jmp	.b
 .o1	or	bl, opflag_f
 	jmp	.b
@@ -141,6 +143,8 @@ _start:
 .o6	or	bl, opflag_x
 	jmp	.b
 .o7	or	bl, opflag_t
+	jmp	.b
+.o8	or	bl, opflag_s
 	jmp	.b
 .arg	mov	dx, msg_usage
 	call	outstring
@@ -711,10 +715,16 @@ initpools:
 	mov	[buf2seg], cx
 	add	cx, ax
 	mov	[buf3seg], cx
-	cmp	[numfats], byte 2
-	jbe	.left2
+	mov	[bufscribbleseg], cx
 	add	cx, ax
-.left2	mov	[buf4seg], cx
+	mov	[buf4seg], ax
+	cmp	[numfats], byte 2
+	jbe	.fat2			; If there's only two FATs, buf3 seg is
+	add	cx, ax			; used for scribble and buf4seg is only
+	jmp	.fata			; used for descendtree; otherwise buf4
+.fat2	add	cx, 32			; is both scribble and descendtree
+	mov	[bufscribbleseg], cx
+.fata	mov	[buf4seg], cx
 	cmp	ax, 32
 	jae	.left3
 	mov	ax, 32
@@ -1107,7 +1117,7 @@ initpools:
 	xor	dx, dx
 	push	word [sectsperchunk]
 	mov	[sectsperchunk], word 1
-	mov	es, [buf4seg]
+	mov	es, [bufscribbleseg]
 	call	diskread0
 	jc	.nbvec
 	xor	ax, ax
@@ -1397,22 +1407,13 @@ stage_fat:
 	mov	dx, [bp - 4]
 	add	ax, di
 	adc	dx, 0
-	call	sectorfromcluster
 	push	es
-	mov	es, [buf4seg]
-	mov	cx, [sectsperclust]
-.isbadclusterloop:
-	push	cx
+	mov	es, [bufscribbleseg]
 	push	di
-	call	diskread0
+	call	scansomeclustes
 	pop	di
-	pop	cx
-	jc	.isbadclusterpop
-	add	ax, [sectsperchunk]
-	adc	dx, 0
-	sub	cx, [sectsperchunk]
-	ja	.isbadclusterloop
-	call	invalidatesector	; It's good now
+	pop	es
+	jc	.isbadcluster	; Still bad
 	pop	es
 	mov	ax, [bp - 6]
 	mov	dx, [bp - 4]
@@ -1423,8 +1424,6 @@ stage_fat:
 	xor	dx, dx
 	call	entrytoblockall
 	jmp	.clustdone
-.isbadclusterpop:
-	pop	es			; Still bad
 .isbadcluster:
 	mov	ax, [bp - 6]
 	mov	dx, [bp - 4]
@@ -1506,12 +1505,12 @@ stage_fat:
 	jmp	.notoverlarge
 .fixallocfarbefore:
 	push	es
-	mov	es, [buf4seg]	; Load prior into buf4 and set end of chain
-	push	ax
-	push	dx
-	call	invalidatesector
-	pop	dx
-	pop	ax
+	mov	es, [bufscribbleseg]	; Load prior into scribble and set end of chain
+	;push	ax
+	;push	dx
+	;call	invalidatesector
+	;pop	dx
+	;pop	ax
 	call	setendchaininfats
 	pop	es
 .notoverlarge:		; Technically the label is correct, the entry is not over the maximum size
@@ -1656,7 +1655,7 @@ stage_dirwalk:
 .rclst	mov	cl, 100			; Count root pointer in progress
 .rflt	mov	[progress], cx
 	mov	si, [reservedsects]
-	mov	di, [reservedsects + 2]
+	xor	di, di
 	mov	bx, 1
 	call	descendtree
 
@@ -1673,7 +1672,7 @@ stage_recover:
 	call	scanbitsclust
 
 	test	[opflags], byte opflag_c
-	jnz	.files
+	jnz	.files			; Cycles aren't found by file counter
 	cmp	[pgdisplay], byte 100
 	jae	stage_finalize
 
@@ -1681,6 +1680,25 @@ stage_recover:
 .files	mov	cx, recoverfiles
 	push	cx
 	mov	ch, 2
+	call	scanbitsclust
+
+stage_freesurface:
+	test	[opflags], byte opflag_s
+	jz	stage_finalize
+	xor	ax, ax
+	cmp	[freeclust], ax
+	jnz	.f
+	cmp	[freeclust + 2], ax
+	jz	stage_finalize
+.f	mov	[progress], ax
+	mov	[progress + 2], ax
+	mov	[pgdisplay], al
+	call	checkmark
+	mov	dx, state_fc
+	call	outstring
+	mov	cx, scanfreeclust
+	push	cx
+	mov	ch, 0
 	call	scanbitsclust
 
 stage_finalize:
@@ -1951,19 +1969,12 @@ getnextcluster:
 	jne	.miss
 	jmp	.found
 .n1	cmp	si, [buf2seg]
-	jne	.n2
+	jne	.miss
 	cmp	ax, [buf2sector]
 	jne	.miss
 	cmp	dx, [buf2sector + 2]
-	jne	.miss
-	jmp	.found
-	;buf3seg can't happen
-.n2	cmp	si, [buf4seg]
-	jne	.miss
-	cmp	ax, [buf4sector]
-	jne	.miss
-	cmp	dx, [buf4sector + 2]
 	je	.found
+	; buffers 3 and 4 aren't cached
 .miss	push	cx
 	push	ax
 	push	dx
@@ -2145,25 +2156,42 @@ checkrootclustno:
 	; which is a special case for update root directory starting cluster.
 	; You don't have to worry about which FAT type it is.
 	; Destroys all registers other than DS,SS
+%define CHUNKSPERCLUST     bp - 2
+%define ENTRIESPERCHUNK    bp - 4
+%define ENTRIESTHISCHUNK   bp - 6
+%define ENTRIESPERCLUST    bp - 8
+%define VFATRESET          bp - 10
+%define DFLAGS             bp - 9
+%define PATCHPOINTSECTOR   bp - 20
+%define PATCHPOINTOFFSET   bp - 22
+%define PATCHPOINTOVERFLOW bp - 24
+%define ENUSTATE           bp - 26
+%define B2SEGSEC           bp - 38
+%define ENURESTARTOFFSET   bp - 32
+%define ENURESTARTCLUSTER  bp - 30
+%define UNWINDENTRY        bp - 12
+%define UNWINDCLUSTER      bp - 16
+%define UNDOGETNEXTCLUSTER bp - 42
+%define SIZEINENTRY        bp - 46
+%define SIZEACCUMULATED    bp - 50
 descendtree:
 	;buf1seg = FAT buffer
 	;buf2seg = directory buffer
-	;buf3seg = (unused, maybe not allocated)
+	;buf3seg = repair buffer (surface scan)
 	;buf4seg = external stack for descent
 	mov	bp, sp
 	sub	sp, 50
 	mov	es, [buf4seg]
 	xor	cx, cx
-	mov	[bp - 10], cx	; BP - 10 = VFAT entry reset
-				; BP - 9 = state flags
+	mov	[VFATRESET], cx	; BP - 9 = state flags
 				;	1 = invalidate
 				;	2 = dirty
 				;	4 = skip size prompt
-	mov	[bp - 20], si	; BP - 20 = patchpoint sector
-	mov	[bp - 18], di
-	mov	[bp - 22], bx	; BP - 22 = patchpoint byte offset
-	mov	[bp - 24], cx	; BP - 24 = overflow from BP-22 when it's FAT
-	mov	[bp - 26], cx	; BP - 26 = enumerator state
+	mov	[PATCHPOINTSECTOR], si
+	mov	[PATCHPOINTSECTOR + 2], di
+	mov	[PATCHPOINTOFFSET], bx
+	mov	[PATCHPOINTOVERFLOW], cx	; BP - 24 = overflow from BP-22 when it's FAT
+	mov	[ENUSTATE], cx	; BP - 26 = enumerator state
 				;	0 = normal
 				;	2 = set not directory and resume
 				;	4 = set E5 scan (VFAT or /Z)
@@ -2172,17 +2200,15 @@ descendtree:
 				;	10 = validate . and ..
 				;	12 = validate VFAT continuance
 				;	14 = nothing (traverse for xlink check)
-				; BP - 30 = enumerator recovery state cluster
-				; BP - 32 = enumerator recovery state offset
-	mov	[bp - 36], cx	; BP - 38 = sector loaded into buf2seg
-	mov	[bp - 38], cx
+	mov	[B2SEGSEC], cx	; BP - 38 = sector loaded into buf2seg
+	mov	[B2SEGSEC + 2], cx
 	dec	cx
-	mov	[bp - 32], cx	; BP - 32 = enumerator recovery state offset
-	mov	[bp - 30], cx	; BP - 30 = enumerator recovery state cluster
-	mov	[bp - 28], cx
-	mov	[bp - 12], cx	; BP - 12 = unwind start entry within cluster
-	mov	[bp - 14], cx	; BP - 16 = unwind cluster
-	mov	[bp - 16], cx
+	mov	[ENURESTARTOFFSET], cx
+	mov	[ENURESTARTCLUSTER], cx
+	mov	[ENURESTARTCLUSTER + 2], cx
+	mov	[UNWINDENTRY], cx
+	mov	[UNWINDCLUSTER], cx
+	mov	[UNWINDCLUSTER + 2], cx
 	xor	si, si
 	mov	[es:si], si	; Starting cluster of directory
 	mov	[es:si + 2], si
@@ -2196,11 +2222,6 @@ descendtree:
 .rootstart:
 	mov	[es:si + 4], ax	; Current cluster of directory
 	mov	[es:si + 6], dx
-	;push	ax			; We don't have to do this right now
-	;push	dx			; because caching of 3 and 4 is disabled already
-	;call	invalidatesector	; ES is not sector data
-	;pop	dx
-	;pop	ax
 	mov	di, 2		; Skip initial . and ..
 	cmp	[bp - 22], word 1
 	jne	.start_isnotroot
@@ -2217,17 +2238,17 @@ descendtree:
 	mul	word [sectsperclust]	; cannot overflow
 	mov	cl, 5
 	shr	ax, cl
-	mov	[bp - 8], ax	; BP - 8 = entries per cluster
+	mov	[ENTRIESPERCLUST], ax
 	
 	mov	ax, [sectsperclust]	; DX already 0 because the above mul
 	mov	cx, [sectsperchunk]
 	div	cx
-	mov	[bp - 2], ax	; BP - 2 = chunks per cluster
+	mov	[CHUNKSPERCLUST], ax
 	xchg	ax, cx
 	mul	word [bytespersector]
 	mov	cx, 32
 	div	cx
-	mov	[bp - 4], ax	; BP - 4 = entries per chunk
+	mov	[ENTRIESPERCHUNK], ax
 
 .readdirentryproc:
 	mov	ax, [es:si + 8]
@@ -2237,26 +2258,32 @@ descendtree:
 	cmp	[es:si + 6], dx
 	jne	.readdircluster
 
-	div	word [bp - 4]
+	div	word [ENTRIESPERCHUNK]
 	mov	di, dx	; Entry within chunk
 	mul	word [sectsperchunk]
 
 	; Read root directory entry
 	mov	bx, [rootdirentries]
-	mov	[bp - 6], bx	; BP - 6 = overflow check value
+	mov	ax, [ENTRIESPERCHUNK]
+	dec	ax
+	and	ax, bx
+	jz	.rootdirentrieswhole
+	xchg	ax, bx
+.rootdirentrieswhole:
+	mov	[ENTRIESTHISCHUNK], bx
 	xor	dx, dx
 	add	ax, [rootdirsect]
 	adc	dx, [rootdirsect + 2]
 	jmp	.readdirchunk
 .readdircluster:
+	mov	cx, [ENTRIESPERCHUNK]
 	and	ax, 7FFFh
-	div	word [bp - 4]
+	div	cx
 	mov	di, dx	; Entry within chunk
 	mov	bx, ax	; Chunk within cluster
 	mov	ax, [es:si + 4]
 	mov	dx, [es:si + 6]
-	mov	cx, [bp - 8]
-	mov	[bp - 6], cx
+	mov	[ENTRIESTHISCHUNK], cx
 	call	sectorfromcluster
 	mov	cx, dx			; CX=sector high
 	xchg	ax, bx			; BX=sector low, AX=chunk
@@ -2264,16 +2291,16 @@ descendtree:
 	add	ax, bx
 	adc	dx, cx			; DX:AX=sector
 .readdirchunk:
-	test	[bp - 9], byte 1	; If we're rewinding we have to check if
+	test	[DFLAGS], byte 1	; If we're rewinding we have to check if
 	jnz	.readdirchunkcachemiss	; it's the same chunk or not, but if the
-	cmp	[bp - 38], ax		; buffer were trashed, we can force reload
+	cmp	[B2SEGSEC], ax		; buffer were trashed, we can force reload
 	jne	.readdirchunkcachemiss
-	cmp	[bp - 36], dx
+	cmp	[B2SEGSEC + 2], dx
 	je	.postreaddirbadsector
 .readdirchunkcachemiss:
-	and	[bp - 9], byte 0FEh
-	mov	[bp - 36], dx	; BP - 38 = sector of current dir cluster
-	mov	[bp - 38], ax
+	and	[DFLAGS], byte 0FEh
+	mov	[B2SEGSEC + 2], dx
+	mov	[B2SEGSEC], ax
 	mov	es, [buf2seg]
 	push	si
 	push	di
@@ -2295,7 +2322,7 @@ descendtree:
 	mov	ah, 0Bh
 	int	21h			; Checks for ^C as INT 25h doesn't
 
-	mov	bx, [bp - 26]
+	mov	bx, [ENUSTATE]
 	mov	ax, [descendtreetable + bx]
 	mov	ch, bl
 
@@ -2317,14 +2344,23 @@ descendtree:
 	mov	ax, [es:si + 4]
 	mov	dx, [es:si + 6]
 	mov	bx, [es:si + 8]
-	cmp	bx, [bp - 32]		; No, there are not 16K entries in a cluster
+	cmp	bx, [ENURESTARTOFFSET]	; No, there are not 16K entries in a cluster
 	jne	.notresetstate
-	cmp	ax, [bp - 30]
+	cmp	ax, [ENURESTARTCLUSTER]
 	jne	.notresetstate
-	cmp	dx, [bp - 28]
+	cmp	dx, [ENURESTARTCLUSTER + 2]
 	jne	.notresetstate
 	call	.doresetstate
 .notresetstate:
+	cmp	di, [ENTRIESTHISCHUNK]
+	jae	.skipentryrollover
+	test	[DFLAGS], byte 1
+	jnz	.skipentryrollover	; di or cache invalidated: reload
+	jmp	.postreaddirbadsector
+.advancewithincluster:
+	jmp	.readdirentryproc
+.skipentryrollover:
+	call	.dirwritebackifdirty
 	test	si, si
 	jnz	.skipentrynotroot
 	cmp	[es:si + 4], word 2
@@ -2335,32 +2371,16 @@ descendtree:
 	cmp	ax, [rootdirentries]
 	jb	.skipentrynotroot
 	jmp	.enddirectory
-.advancenorollover:
-	test	[bp - 9], byte 1
-	jz	.postreaddirbadsector
-	jmp	.readdirentryproc	; Cache invalidated: reload
 .skipentrynotroot:
-	cmp	di, [bp - 4]
-	jb	.advancenorollover
-	call	.dirwritebackifdirty
-	test	si, si
-	jnz	.advancenotroot
-	cmp	[es:si + 4], si
-	jne	.advancenotroot
-	cmp	[es:si + 6], si
-	jne	.advancenotroot
-.advancewithincluster:
-	jmp	.readdirentryproc
-.advancenotroot:
 	mov	ax, [es:si + 8]
 	and	ax, 7FFFh
-	cmp	ax, [bp - 8]
+	cmp	ax, [ENTRIESPERCLUST]
 	jb	.advancewithincluster
 	mov	ax, [es:si + 4]
 	mov	dx, [es:si + 6]
 	mov	es, [buf1seg]
-	mov	[bp - 42], ax
-	mov	[bp - 40], dx	; BP - 40: undo getnextcluster
+	mov	[UNDOGETNEXTCLUSTER], ax
+	mov	[UNDOGETNEXTCLUSTER + 2], dx
 	call	getnextcluster
 	call	[isbadcluster]
 	jne	.advanceisnotbad
@@ -2370,11 +2390,11 @@ descendtree:
 	mov	dx, query_fixtail
 	call	queryfixyn
 	cmp	al, 'y'
-	mov	ax, [bp - 42]
-	mov	dx, [bp - 40]
+	mov	ax, [UNDOGETNEXTCLUSTER]
+	mov	dx, [UNDOGETNEXTCLUSTER + 2]
 	jne	.enddirectorycleanv
-	mov	[bp - 26], byte 255
-	mov	di, [bp - 8]
+	mov	[ENUSTATE], byte 255
+	mov	di, [ENTRIESPERCLUST]
 	jmp	.readdirbadsector_recover
 .advanceisnotbad:
 	mov	es, [buf4seg]
@@ -2385,9 +2405,9 @@ descendtree:
 	test	[opflags], byte opflag_c
 	jz	.advanceiscluster
 	mov	cx, 0FFFFh
-	cmp	[bp - 30], cx
+	cmp	[ENURESTARTCLUSTER], cx
 	jne	.advancecheckxlink
-	cmp	[bp - 28], cx
+	cmp	[ENURESTARTCLUSTER + 2], cx
 	jne	.advanceiscluster
 .advancecheckxlink:
 	push	si
@@ -2400,8 +2420,8 @@ descendtree:
 	call	queryfixyn
 	cmp	al, 'y'
 	jne	.enddirectorycleanv	; We can't keep scanning!
-	mov	ax, [bp - 42]
-	mov	dx, [bp - 40]
+	mov	ax, [UNDOGETNEXTCLUSTER]
+	mov	dx, [UNDOGETNEXTCLUSTER + 2]
 	mov	es, [buf1seg]
 	push	si
 	call	setendchaininfats
@@ -2422,11 +2442,11 @@ descendtree:
 	and	[es:si + 8], word 8000h	;Reset entry within cluster, keep flag
 	;There are two possible encodings for transition at start of cluster:
 	;at the end of the last cluster and the start of the next.
-	test	[bp - 32], word 7FFFh
+	test	[ENURESTARTOFFSET], word 7FFFh
 	jnz	.notresetstate2
-	cmp	ax, [bp - 30]
+	cmp	ax, [ENURESTARTCLUSTER]
 	jne	.notresetstate2
-	cmp	dx, [bp - 28]
+	cmp	dx, [ENURESTARTCLUSTER + 2]
 	jne	.notresetstate2
 	call	.doresetstate
 .notresetstate2:
@@ -2434,10 +2454,10 @@ descendtree:
 .enddirectory:
 	call	.dirwritebackifdirty
 .enddirectoryclean:
-	mov	[bp - 26], byte 0	; Return to normal state
+	mov	[ENUSTATE], byte 0	; Return to normal state
 	sub	si, 10
 	jc	.endscan
-	or	[bp - 9], byte 1	; invalidate cache and force advancenorollover to recompute
+	or	[DFLAGS], byte 1	; invalidate cache and force advancenorollover to recompute
 	jmp	.skipentry
 .endscan:
 	mov	sp, bp
@@ -2452,7 +2472,7 @@ descendtree:
 	je	.scanlfnremovev
 	cmp	[es:bx + 0Bh], byte 0Fh
 	je	.scanlfnentrysubsequent
-	cmp	[bp - 10], byte 1	; Not an LFN entry; check if LFN ended at end of sequence
+	cmp	[VFATRESET], byte 1	; Not an LFN entry; check if LFN ended at end of sequence
 	je	.scanlfnchkname
 .scanlfnremovevprev:
 	clc
@@ -2470,12 +2490,12 @@ descendtree:
 	mov	ah, [es:bx + 0Dh]
 	cmp	ah, [vfatsum]		; Clearly all entries must refer to the same
 	jne	.scanlfnremovevthis	; and therefore have the same base checksum
-	mov	ah, [bp - 10]
+	mov	ah, [VFATRESET]
 	dec	ah
 	jz	.scanlfnremovevthis
 	cmp	ah, al
 	jne	.scanlfnremovevthis
-	mov	[bp - 10], ah
+	mov	[VFATRESET], ah
 	jmp	.skipentry
 
 .scanlfnchkname:
@@ -2497,8 +2517,8 @@ descendtree:
 	je	.scanlfnremovev	; CF is clear if E
 	cmp	al, byte 0E5h
 	je	short .scanlfnremovev
-	mov	[bp - 26], byte 0
-	mov	[bp - 10], byte 0
+	mov	[ENUSTATE], byte 0
+	mov	[VFATRESET], byte 0
 	jmp	.scannormal_entry
 .scanlfnremove1:
 	jmp	.scansetnormal_delete
@@ -2515,45 +2535,45 @@ descendtree:
 	jz	.scanlfnremove1	; Started with subsequent LFN
 	and	al, 3Fh
 	jz	.scanlfnremove1	; Sequence number started with 0
-	mov	[bp - 10], al
-	mov	[bp - 26], byte 12
+	mov	[VFATRESET], al
+	mov	[ENUSTATE], byte 12
 	mov	ah, [es:bx + 0Dh]
 	mov	[vfatsum], ah
 	mov	es, [buf4seg]
 	mov	ax, [es:si + 4]	; Set up unwind
 	mov	dx, [es:si + 6]
-	mov	[bp - 16], ax
-	mov	[bp - 14], dx
+	mov	[UNWINDCLUSTER], ax
+	mov	[UNWINDCLUSTER + 2], dx
 	mov	dx, [es:si + 8]
-	mov	[bp - 12], dx
+	mov	[UNWINDENTRY], dx
 .scanlfnskipentryv:
 	jmp	.skipentry	; It's a volume label. Nothing to do.
 
 .scanlfnremovethis:
 	stc
 .scanlfnremove:
-	mov	[bp - 10], byte 0
+	mov	[VFATRESET], byte 0
 	mov	es, [buf4seg]
 	mov	ax, [es:si + 4]
 	mov	dx, [es:si + 6]
 	mov	di, [es:si + 8]
 	adc	di, 0		; If this, reset after this entry; else before this entry
-	mov	[bp - 30], ax
-	mov	[bp - 28], dx
-	mov	[bp - 32], di
-	mov	ax, [bp - 16]
-	mov	dx, [bp - 14]
-	mov	di, [bp - 12]
+	mov	[ENURESTARTCLUSTER], ax
+	mov	[ENURESTARTCLUSTER + 2], dx
+	mov	[ENURESTARTOFFSET], di
+	mov	ax, [UNWINDCLUSTER]
+	mov	dx, [UNWINDCLUSTER + 2]
+	mov	di, [UNWINDENTRY]
 	mov	[es:si + 4], ax
 	mov	[es:si + 6], dx
 	mov	[es:si + 8], di
-	mov	[bp - 26], byte 4
+	mov	[ENUSTATE], byte 4
 	jmp	.readdirentryproc
 
 .scansetnotdir:
-	mov	[bp - 26], byte 0
+	mov	[ENUSTATE], byte 0
 	and	[es:bx + 0Bh], byte 0EFh; Clear directory flag
-	or	[bp - 9], byte 2	; set dirty bit
+	or	[DFLAGS], byte 2	; set dirty bit
 	;fall-through
 
 .scannormal_entry:
@@ -2571,7 +2591,7 @@ descendtree:
 	mov	[es:bx + 0Dh], byte 0E5h
 	mov	[es:bx + 14h], word 0
 	mov	[es:bx + 1Ah], word 0
-	or	[bp - 9], byte 2	; set dirty bit
+	or	[DFLAGS], byte 2	; set dirty bit
 .scansetnormal_allones_skipentryv:
 	jmp	.skipentry
 .scansetnormal_notallones:
@@ -2592,7 +2612,7 @@ descendtree:
 	cmp	al, 'y'
 	jne	.scanentry_notreserved
 	mov	[es:bx + 3], byte '_'	; Trick: no reserved name contains an _; this slot seems most reasonable given the names
-	or	[bp - 9], byte 2	; set dirty bit
+	or	[DFLAGS], byte 2	; set dirty bit
 .scanentry_notreserved:
 	call	[getdircluster]
 	test	dx, dx
@@ -2629,7 +2649,7 @@ descendtree:
 	pop	ax
 	jne	.scannormal_notdirectory_empty
 	and	[es:bx + 0Bh], byte 0EFh
-	or	[bp - 9], byte 2	; set dirty bit
+	or	[DFLAGS], byte 2	; set dirty bit
 .scannormal_notdirectory_empty:
 	mov	cx, [es:bx + 1Ch]
 	or	cx, [es:bx + 1Eh]
@@ -2641,7 +2661,7 @@ descendtree:
 	xor	cx, cx
 	mov	[es:bx + 1Ch], cx
 	or	[es:bx + 1Eh], cx
-	or	[bp - 9], byte 2	; set dirty bit
+	or	[DFLAGS], byte 2	; set dirty bit
 .scannormal_notdirectory_empty0:
 	jmp	.skipentry
 .scannormal_notempty:
@@ -2672,7 +2692,7 @@ descendtree:
 	jz	.scannormal_notdirectory
 	jmp	.scannormal_directory
 .scannormal_notdirectory:
-	test	[opflags], byte opflag_c
+	test	[opflags], byte opflag_c | opflag_s
 	jz	.scannormal_notdirectory_empty0
 	jmp	.scannormal_notdirectory_traverse
 .scanbits_free:
@@ -2705,11 +2725,11 @@ descendtree:
 .scanbits_nofix:
 	jmp	.skipentry
 .scannormal_enddirectorydecision:
-	test	[opflags], byte opflag_c
+	test	[opflags], byte opflag_c | opflag_s
 	jnz	.scannormal_xlinkonly
 	jmp	.enddirectory
 .scannormal_xlinkonly:
-	mov	[bp - 26], byte 14
+	mov	[ENUSTATE], byte 14
 	jmp	.skipentry
 .scannormal:
 	cmp	[es:bx], byte 0
@@ -2720,13 +2740,13 @@ descendtree:
 	mov	ax, [es:si + 4]		; Set up for setting E5 if an entry is found below
 	mov	dx, [es:si + 6]
 	mov	bx, [es:si + 8]
-	mov	[bp - 16], ax
-	mov	[bp - 14], dx
-	mov	[bp - 12], bx
-	mov	[bp - 26], byte 8
+	mov	[UNWINDCLUSTER], ax
+	mov	[UNWINDCLUSTER + 2], dx
+	mov	[UNWINDENTRY], bx
+	mov	[ENUSTATE], byte 8
 	test	[opflags], byte opflag_t
 	jz	.scannormal_enddirectory_out
-	mov	[bp - 26], byte 14
+	mov	[ENUSTATE], byte 14
 .scannormal_enddirectory_out:
 	jmp	.skipentry
 .scannormal_toodeep:
@@ -2769,29 +2789,65 @@ descendtree:
 	mov	[es:si + 6], dx
 	mov	[es:si + 8], word 1	; Start processing at the second entry when validate dots finishes
 	mov	cx, 0FFFFh
-	mov	[bp - 32], cx	; enumerator recovery state offset
-	mov	[bp - 30], cx	; enumerator recovery state clsuter
-	mov	[bp - 28], cx
-	mov	[bp - 12], cx	; unwind start entry within cluster
-	mov	[bp - 14], cx	; unwind cluster
-	mov	[bp - 16], cx
-	mov	[bp - 26], byte 10	; Validate . and .. after load
+	mov	[ENURESTARTOFFSET], cx
+	mov	[ENURESTARTCLUSTER], cx
+	mov	[ENURESTARTCLUSTER + 2], cx
+	mov	[UNWINDENTRY], cx
+	mov	[UNWINDCLUSTER], cx
+	mov	[UNWINDCLUSTER + 2], cx
+	mov	[ENUSTATE], byte 10	; Validate . and .. after load
 	jmp	.readdirentryproc
 .scannormal_notdirectory_traverse:
-	and	[bp - 9], byte 0FBh	; clear no prompt size bit
+	and	[DFLAGS], byte 0FBh	; clear no prompt size bit
 	mov	cx, [es:bx + 1Ch]
-	mov	[bp - 44], cx		; BP - 44: size of file in entry
+	mov	[SIZEINENTRY], cx		; BP - 44: size of file in entry
 	mov	cx, [es:bx + 1Eh]
-	mov	[bp - 46], cx
+	mov	[SIZEINENTRY + 2], cx
 	xor	cx, cx
-	mov	[bp - 48], cx		; BP - 48: size of file accumulated
-	mov	[bp - 50], cx
+	mov	[SIZEACCUMULATED], cx		; BP - 48: size of file accumulated
+	mov	[SIZEACCUMULATED + 2], cx
 	push	si
 	push	di
 	push	bx
+	test	[opflags], byte opflag_s
+	jz	.scannormal_nosurface_initial
+	pop	bx
+	push	bx
+	call	.scanthisclust
+	jnc	.scannormal_notbad_initial
+	mov	cx, zerosector
+	push	cx
+	xor	cx, cx
+	mov	[UNDOGETNEXTCLUSTER], ax		; Need to spill them
+	mov	[UNDOGETNEXTCLUSTER + 2], dx
+	push	ax
+	push	dx
+	mov	ax, bx
+	xor	dx, dx
+	div	word [bytespersector]
+	mov	bx, dx
+	xor	dx, dx
+	add	ax, [B2SEGSEC]
+	adc	dx, [B2SEGSEC + 2]
+	push	cx
+	push	bx
+	push	dx
+	push	ax
+	mov	ax, [UNDOGETNEXTCLUSTER]
+	mov	dx, [UNDOGETNEXTCLUSTER + 2]
+	mov	es, [buf3seg]
+	call	recoverbadsector
+	;recoverbadsector updated the underlying beneath us; perform the same update
+	;to the cached copy in case we do in fact have a dirty cache at some point
+	mov	es, [buf2seg]
+	pop	bx
+	push	bx
+	call	[setdircluster]
+.scannormal_notbad_initial:
+.scannormal_nosurface_initial:
 	mov	es, [buf1seg]
-	mov	[bp - 40], ax
-	mov	[bp - 42], dx
+	mov	[UNDOGETNEXTCLUSTER], ax
+	mov	[UNDOGETNEXTCLUSTER + 2], dx
 	call	getnextcluster
 	call	[isbadcluster]
 	jne	.scannormal_notbad
@@ -2810,7 +2866,9 @@ descendtree:
 	jmp	.scannormal_notdirectory_end2
 .scannormal_notbad:
 	call	isendchainagnostic
-	jc	.scannormal_endchainv
+	jc	short .scannormal_endchainv
+	test	[opflags], byte opflag_c
+	jz	short .scannormal_skiptraversexlink
 	push	ax
 	push	dx
 	call	getbitsclust
@@ -2830,8 +2888,8 @@ descendtree:
 	pop	dx
 	pop	ax
 	jne	short .scannormal_notdirectory_end3v
-	mov	ax, [bp - 40]
-	mov	dx, [bp - 42]
+	mov	ax, [UNDOGETNEXTCLUSTER]
+	mov	dx, [UNDOGETNEXTCLUSTER + 2]
 	call	setendchaininfats
 .scannormal_endchainv:
 	jmp	.scannormal_endchain
@@ -2844,24 +2902,17 @@ descendtree:
 	call	setbitsclust
 	pop	dx
 	pop	ax
+.scannormal_skiptraversexlink:
 	mov	cx, [bytesperclust]
-	add	[bp - 48], cx
-	adc	[bp - 50], word 0
-	jc	.scannormal_impossiblybig
-.scannormal_notxlink2:
-	mov	[bp - 40], ax
-	mov	[bp - 42], dx
-	call	getnextcluster
-	call	[isbadcluster]
-	jne	.scannormal_notbad
-	jmp	.scannormal_subsequent_bad
-.scannormal_impossiblybig:
-	test	[bp - 9], byte 4
+	add	[SIZEACCUMULATED], cx
+	adc	[SIZEACCUMULATED + 2], word 0
+	jnc	.scannormal_notxlink2
+	test	[DFLAGS], byte 4
 	jnz	.scannormal_notxlink2
-	or	[bp - 9], byte 4
-	pop	bx
-	push	bx
-	push	ax
+	or	[DFLAGS], byte 4	; File is too big
+	pop	bx			; error message only no fix is available
+	push	bx			; There's a story going around the internet
+	push	ax			; that some OS does this deliberately
 	push	dx
 	mov	dx, out_crfile		; Too big
 	call	outstring
@@ -2874,7 +2925,28 @@ descendtree:
 	mov	es, [buf1seg]
 	pop	dx
 	pop	ax
-	jmp	.scannormal_notxlink2
+.scannormal_notxlink2:
+	test	[opflags], byte opflag_s
+	jz	.scannormal_surfacedone
+	pop	bx
+	push	bx
+	call	.scanthisclust
+	jnc	.scannormal_surfacedone
+	push	es
+	mov	cx, zerosector
+	push	cx
+	xor	cx, cx
+	push	cx
+	push	word [reservedsects]
+	push	word [UNDOGETNEXTCLUSTER + 2]
+	push	word [UNDOGETNEXTCLUSTER]
+	mov	es, [buf3seg]
+	call	recoverbadsector
+	pop	es
+.scannormal_surfacedone:
+	call	getnextcluster
+	call	[isbadcluster]
+	jne	.scannormal_notbad
 .scannormal_subsequent_bad:
 	pop	bx
 	mov	es, [buf2seg]
@@ -2884,10 +2956,10 @@ descendtree:
 	cmp	al, 'y'
 	jne	.scannormal_notdirectory_end2
 	push	bx
-	mov	ax, [bp - 40h]
-	mov	dx, [bp - 42h]
+	mov	ax, [UNDOGETNEXTCLUSTER]
+	mov	dx, [UNDOGETNEXTCLUSTER + 2]
 	call	setendchaininfats
-	or	[bp - 9], byte 4
+	or	[DFLAGS], byte 4
 	jmp	.scannormal_endchain
 .scannormal_notdirectory_end3:
 	pop	bx
@@ -2897,21 +2969,21 @@ descendtree:
 .scannormal_notdirectory_end:
 	jmp	.skipentry
 .scannormal_endchain:
-	mov	si, [bp - 48]
-	mov	di, [bp - 50]
-	cmp	di, [bp - 46]
+	mov	si, [SIZEACCUMULATED]
+	mov	di, [SIZEACCUMULATED + 2]
+	cmp	di, [SIZEINENTRY + 2]
 	ja	.scannormal_file_tooshort
 	jb	.scannormal_file_nottooshort
-	cmp	si, [bp - 44]
+	cmp	si, [SIZEINENTRY]
 	jae	.scannormal_file_tooshort
 .scannormal_file_nottooshort:
 	add	si, [bytesperclust]
 	adc	di, 0
 	jc	.scannormal_file_nottoolong
-	cmp	di, [bp - 46]
+	cmp	di, [SIZEINENTRY + 2]
 	ja	.scannormal_file_nottoolong
 	jb	.scannormal_file_toolong
-	cmp	si, [bp - 44]
+	cmp	si, [SIZEINENTRY]
 	jb	.scannormal_file_toolong
 .scannormal_file_nottoolong:
 	jmp	.scannormal_notdirectory_end3
@@ -2924,7 +2996,7 @@ descendtree:
 .scannormal_file_toolong:
 	mov	es, [buf2seg]
 	pop	bx
-	test	[bp - 9], byte 4
+	test	[DFLAGS], byte 4
 	jnz	.scannormal_file_setlength
 	mov	dx, query_fixbadlen
 	call	.queryfixentry
@@ -2933,7 +3005,7 @@ descendtree:
 .scannormal_file_setlength:
 	mov	[es:bx + 1Ch], si
 	mov	[es:bx + 1Eh], di
-	or	[bp - 9], byte 2	; set dirty bit
+	or	[DFLAGS], byte 2	; set dirty bit
 .scannormal_file_nosetlength:
 	jmp	.scannormal_notdirectory_end2
 
@@ -2943,7 +3015,7 @@ descendtree:
 	mov	[es:bx + 0Dh], byte 0E5h
 	mov	[es:bx + 14h], word 0
 	mov	[es:bx + 1Ah], word 0
-	or	[bp - 9], byte 2	; set dirty bit
+	or	[DFLAGS], byte 2	; set dirty bit
 .scanskipreturn:
 	jmp	.skipentry
 
@@ -2954,25 +3026,20 @@ descendtree:
 	test	al, byte 10h
 	jz	.scanskipreturn
 	call	[getdircluster]
-	push	ax
-	push	dx
-	call	.dirwritebackifdirty
-	or	[bp - 9], byte 1
-	pop	dx
-	pop	ax
+	mov	es, [buf3seg]
 	call	sectorfromcluster
 	push	si
 	push	di
 	call	diskread0
 	pop	di
 	pop	si
-	jc	.scanskipreturn_vnotzero	; Not dealing with this nonsense
+	jc	.scanskipreturn		; Not dealing with this nonsense
 	push	ax
 	push	dx
 	mov	es, [buf4seg]
 	mov	ax, [es:si]
 	mov	dx, [es:si + 2]
-	mov	es, [buf2seg]
+	mov	es, [buf3seg]
 	mov	bx, 20h
 	call	[setdircluster]
 	pop	dx
@@ -2992,20 +3059,20 @@ descendtree:
 	test	[opflags], byte opflag_z
 	jnz	.scannotzero_e5
 	mov	[es:bx], byte 0
-	or	[bp - 9], byte 2	; set dirty bit
+	or	[DFLAGS], byte 2	; set dirty bit
 	jmp	.scanskipreturn_vnotzero
 .scannotzero_e5:
 	mov	es, [buf4seg]
-	mov	bx, [bp - 12]
-	mov	dx, [bp - 14]
-	mov	ax, [bp - 16]
+	mov	bx, [UNWINDENTRY]
+	mov	dx, [UNWINDCLUSTER]
+	mov	ax, [UNWINDCLUSTER + 2]
 	xchg	ax, [es:si + 4]		; Set exit point
 	xchg	dx, [es:si + 6]
 	xchg	bx, [es:si + 8]
-	mov	[bp - 32], bx
-	mov	[bp - 30], ax
-	mov	[bp - 28], dx
-	mov	[bp - 26], byte 4
+	mov	[ENURESTARTOFFSET], bx
+	mov	[ENURESTARTCLUSTER], ax
+	mov	[ENURESTARTCLUSTER + 2], dx
+	mov	[ENUSTATE], byte 4
 	jmp	.readdirentryproc
 
 	; Rebuild trashed . entries from bad sector recovery
@@ -3025,7 +3092,7 @@ descendtree:
 	mov	es, [buf2seg]
 	mov	ax, '..'
 	call	generatedotdirectoryentry
-	or	[bp - 9], byte 2	; set dirty bit
+	or	[DFLAGS], byte 2	; set dirty bit
 	jmp	.dotentries_match2
 
 .scanvaliddotentries_t:
@@ -3123,37 +3190,38 @@ descendtree:
 	xchg	ax, bx
 	mov	bx, 20h
 	call	[setdircluster]
-	or	[bp - 9], byte 2	; set dirty bit
+	or	[DFLAGS], byte 2	; set dirty bit
 .dotentries_match2:
 	; Start processing normally at the second entry
 	mov	es, [buf4seg]
 	mov	di, 1
-	mov	[bp - 26], byte 0
+	mov	[ENUSTATE], byte 0
 	jmp	.skipentry
 .dotentries_isfile:
 	sub	si, 10
-	mov	[bp - 26], byte 2
+	mov	[ENUSTATE], byte 2
 	mov	es, [buf4seg]
 	jmp	.readdirentryproc
 
 ; Inner functions of descendtree
 .doresetstate:
 	mov	cx, 0FFFFh	; Hit roll-forward marker to set state back to 0
-	mov	[bp - 16], cx
-	mov	[bp - 14], cx
-	mov	[bp - 12], cx
-	mov	[bp - 30], cx
-	mov	[bp - 28], cx
+	mov	[UNWINDCLUSTER], cx
+	mov	[UNWINDCLUSTER + 2], cx
+	mov	[UNWINDENTRY], cx
+	mov	[ENURESTARTCLUSTER], cx
+	mov	[ENURESTARTCLUSTER + 2], cx
+	mov	[ENURESTARTOFFSET], cx
 	inc	cx		; set CX to 0
-	mov	[bp - 26], cx
+	mov	[ENUSTATE], cx
 	ret
 
 .dirwritebackifdirty:
-	test	[bp - 9], byte 2
+	test	[DFLAGS], byte 2
 	jz	.dirisnotdirty
-	and	[bp - 9], byte 0FDh
-	mov	dx, [bp - 36]	; BP - 38 = sector of current dir cluster
-	mov	ax, [bp - 38]
+	and	[DFLAGS], byte 0FDh
+	mov	ax, [B2SEGSEC]
+	mov	dx, [B2SEGSEC + 2]
 	mov	es, [buf2seg]
 	push	si
 	push	di
@@ -3209,7 +3277,7 @@ descendtree:
 	inc	si
 	loop	.fix_entryname_loop
 	pop	si
-	or	[bp - 9], byte 2	; set dirty bit
+	or	[DFLAGS], byte 2	; set dirty bit
 	ret
 
 .validatechar:
@@ -3340,6 +3408,29 @@ descendtree:
 	pop	ax
 	ret
 
+.scanthisclust:
+	push	ax
+	push	dx
+	push	es
+	push	bx
+	call	scansomeclust
+	pop	bx
+	pop	es
+	jnc	.scanthisclust_popret
+	mov	dx, query_filebdsec
+	call	.queryfixentry
+	cmp	al, 'n'
+	pop	dx
+	pop	ax
+	je	.scanthisclust_ret
+	stc
+.scanthisclust_ret:
+	ret
+.scanthisclust_popret:
+	pop	dx
+	pop	ax
+	ret
+
 .readdirnofixbad:		; We can't recover from skipping this one
 	jmp	exit_nofix
 	; Routine for repairing bad sector in directory
@@ -3376,17 +3467,17 @@ descendtree:
 	jne	.readdirbadsector_subsequent
 	test	si, si
 	jnz	.readdirbadsector_childcall
-	push	word [bp - 18]
-	push	word [bp - 20]
-	push	word [bp - 22]
-	push	word [bp - 24]
+	push	word [PATCHPOINTSECTOR + 2]
+	push	word [PATCHPOINTSECTOR]
+	push	word [PATCHPOINTOFFSET]
+	push	word [PATCHPOINTOVERFLOW]
 	jmp	.readdirbadsector_es
 .readdirbadsector_subsequent:
 	xor	ax, ax
 	push	ax
 	push	word [reservedsects]
-	push	word [bp - 40]
-	push	word [bp - 42]
+	push	word [UNDOGETNEXTCLUSTER + 2]
+	push	word [UNDOGETNEXTCLUSTER]
 	jmp	.readdirbadsector_es
 .readdirbadsector_childcall:
 	;Generate patchpoint from unwind data
@@ -3437,11 +3528,11 @@ descendtree:
 	jne	.recbadsectornotfirst
 	mov	[es:si], ax
 	mov	[es:si + 2], dx
-	mov	[bp - 30], ax
-	mov	[bp - 28], dx
-	mov	[bp - 26], byte 6
+	mov	[ENURESTARTCLUSTER], ax
+	mov	[ENURESTARTCLUSTER + 2], dx
+	mov	[ENUSTATE], byte 6
 	or	di, 8000h
-	mov	[bp - 32], di
+	mov	[ENURESTARTOFFSET], di
 	mov	[es:si + 8], word 8002h	; Rewind and adjust pointers
 	jmp	.readdirentryproc	; yes, this overwrite the enddirectory state
 .recbadsectornotfirst:
@@ -3449,12 +3540,30 @@ descendtree:
 	mov	cx, dx
 	mov	[es:si], ax
 	mov	[es:si + 2], dx
-	cmp	[bp - 26], byte 255	; if set, we're already off the end and can't go to readdirentryproc
+	cmp	[ENUSTATE], byte 255	; if set, we're already off the end and can't go to readdirentryproc
 	je	.recbadenddir
 	jmp	.readdirentryproc
 .recbadenddir:
-	mov	[bp - 26], byte 0
+	mov	[ENUSTATE], byte 0
 	jmp	.enddirectoryclean
+%undef CHUNKSPERCLUST
+%undef ENTRIESPERCHUNK
+%undef ENTRIESTHISCHUNK
+%undef ENTRIESPERCLUST
+%undef VFATRESET
+%undef DFLAGS
+%undef PATCHPOINTSECTOR
+%undef PATCHPOINTOFFSET
+%undef PATCHPOINTOVERFLOW
+%undef ENUSTATE
+%undef B2SEGSEC
+%undef ENURESTARTOFFSET
+%undef ENURESTARTCLUSTER
+%undef UNWINDENTRY
+%undef UNWINDCLUSTER
+%undef UNDOGETNEXTCLUSTER
+%undef SIZEINENTRY
+%undef SIZEACCUMULATED
 
 .recbadsectorfillfirst:
 	jc	.recbadsectorfillfirstbad
@@ -3516,11 +3625,19 @@ descendtree:
 	pop	si
 	ret
 
+zerosector:	; Non-directory argument to recoverbadsector
+	jnc	.ret
+	xor	ax, ax
+	mov	cx, [bytespersector]
+	shr	cx, 1
+	rep	stosw
+.ret	ret
+
 	; Given a bad cluster, swaps it for a new cluster and updates pointers
 	; DX:AX = cluster, ES = working buffer
-	; On stack: BP + 4 (SP + 2) target cluster/offset (cluster 1 = root director pointer)
+	; On stack: BP + 4 (SP + 2) target cluster/offset (cluster 1 = root director pointer, cluster 0 = RAM pointer only)
 	;           BP + 8 (SP + 6) target sector (if start of fat, BP + 4 is cluster, else offset)
-	;           BP + 12 (SP + 10) sector builder (called with CF=bad, DI=0, SI=sector within cluster; must preserve SI)
+	;           BP + 12 (SP + 10) sector builder (called with CF=bad, DI=0, SI=sector within cluster; must preserve SI,BP)
 	; Destroys BX, CX, SI, DI
 	; Returns DX:AX = new cluster
 recoverbadsector:
@@ -3591,6 +3708,8 @@ recoverbadsector:
 	mov	dx, [bp + 10]
 	test	dx, dx
 	jnz	.issector
+	test	ax, ax
+	jz	.isnone
 	cmp	ax, [reservedsects]
 	jne	.issector
 	mov	ax, [bp + 4]
@@ -3605,7 +3724,7 @@ recoverbadsector:
 	push	word [bp - 10]
 	push	word [bp - 12]
 	call	setclusterinfats
-	jmp	.epilog
+.isnone	jmp	.epilog
 .isboot:
 	; If we get here, must be a FAT32 EBPB
 	push	word [sectsperchunk]
@@ -3656,9 +3775,7 @@ recoverbadsector:
 	call	diskwrite0
 .nobackupbootsector:
 	pop	word [sectsperchunk]
-.epilog:
-	; return new cluster
-	mov	ax, [bp - 12]
+.epilog	mov	ax, [bp - 12]	; return new cluster
 	mov	dx, [bp - 10]
 	mov	sp, bp
 	pop	bp
@@ -3861,20 +3978,20 @@ recoverdirs:
 	xor	di, di
 	call	recoverlength_loopfix
 	jmp	.recnc2				; Now we know there's no cycle
-.recnc	mov	[savedfilename], ax
-	mov	[savedfilename + 2], dx
+.recnc	mov	[clusterxfer], ax
+	mov	[clusterxfer + 2], dx
 .recnc2	mov	bx, [bp - 8]
 	mov	cx, [bp - 6]
-	mov	[savedfilename + 4], bx
-	mov	[savedfilename + 6], cx
+	mov	[savedfilename + 14], bx
+	mov	[savedfilename + 16], cx
 	mov	dx, [bp - 10]	; LOST.FND
 	mov	ax, [bp - 12]
 	mov	bx, matchemptyslot.ret
 	mov	si, matchemptyslot
 	mov	cx, .create
 	call	mkdirentry
-	mov	ax, [savedfilename]		; First fix parent cluster ref
-	mov	dx, [savedfilename + 2]
+	mov	ax, [clusterxfer]		; First fix parent cluster ref
+	mov	dx, [clusterxfer + 2]
 	call	sectorfromcluster
 	call	diskread0
 	jc	newbadsectors
@@ -3889,7 +4006,7 @@ recoverdirs:
 	mov	ch, 60h
 	call	diskwrite0
 	mov	sp, bp	; Will now call into descendtree
-	mov	ax, [savedfilename]
+	mov	ax, [savedfilename]		; from .create
 	mov	dx, [savedfilename + 2]
 	push	ax
 	push	dx
@@ -3897,9 +4014,18 @@ recoverdirs:
 	call	setbitsclust	; It's reached now
 	pop	dx
 	pop	ax
-	mov	si, [savedfilename + 8]
-	mov	di, [savedfilename + 10]
-	mov	bx, [savedfilename + 12]
+	mov	si, [savedfilename]
+	mov	di, [savedfilename + 2]
+	push	ax
+	push	dx
+	xor	ax, ax
+	mov	ax, [savedfilename + 4]
+	div	word [bytespersector]
+	mov	bx, dx
+	add	si, ax
+	adc	di, word 0
+	pop	dx
+	pop	ax
 	call	descendtree
 	pop	bp	; Finally pop bp (can't earlier as descendtree does not save)
 	pop	dx	; Check if we finished or not
@@ -3912,13 +4038,13 @@ recoverdirs:
 	cmp	ch, 2
 	jne	short	.f_ret
 	jmp	recoverdirs		; Still hanging: something up the chain must have not been a directory after all
-.create	mov	[savedfilename + 8], ax		; Save location for descendtree
-	mov	[savedfilename + 10], dx
-	mov	[savedfilename + 12], di
-	mov	ax, [savedfilename]
-	mov	dx, [savedfilename + 2]
-	mov	bx, [savedfilename + 4]
-	mov	cx, [savedfilename + 6]
+.create	mov	[savedfilename], ax		; Save location for descendtree
+	mov	[savedfilename + 2], dx
+	mov	[savedfilename + 4], di
+	mov	bx, [savedfilename + 12]		; Date+Time recovered from . entry
+	mov	cx, [savedfilename + 14]
+	mov	ax, [clusterxfer]
+	mov	dx, [clusterxfer + 2]
 	mov	[es:di + 14h], dx
 	mov	[es:di + 1Ah], ax
 	mov	[es:di + 16h], bx
@@ -3972,14 +4098,17 @@ recoverfiles:
 	test	[opflags], byte opflag_c
 	jz	.rnc
 	inc	di
-.rnc	call	recoverlength_loopfix
+.rnc	test	[opflags], byte opflag_s
+	jz	.rns
+	or	di, byte 2
+.rns	call	recoverlength_loopfix
 	call	mklostfnd
 	mov	bx, matchemptyslot.ret
 	mov	si, matchemptyslot
 	mov	cx, .create
 	jmp	mkdirentry
-.create	mov	ax, [savedfilename]
-	mov	dx, [savedfilename + 2]
+.create	mov	ax, [clusterxfer]
+	mov	dx, [clusterxfer + 2]
 	call	getdatetime
 	mov	[es:di + 14h], dx
 	mov	[es:di + 1Ah], ax
@@ -3992,30 +4121,64 @@ recoverfiles:
 	mov	[es:di + 0Eh], cx
 	mov	[es:di + 10h], cx
 	mov	[es:di + 12h], cx
-	mov	cx, [savedfilename + 4]
+	mov	cx, [lengthxfer]
 	mov	[es:di + 1Ch], cx
-	mov	cx, [savedfilename + 6]
+	mov	cx, [lengthxfer + 2]
 	mov	[es:di + 1Eh], cx
 	lea	si, [di + 8]
 	jmp	recovernamefile
 
 recoverlength_loopfix:		; DX:AX = cluster, DI = flags; destroys everything but BP
-	mov	[savedfilename], ax
-	mov	[savedfilename + 2], dx
+	push	bp
+	mov	bp, sp
+	sub	sp, 4
+	mov	[clusterxfer], ax
+	mov	[clusterxfer + 2], dx
 	xor	cx, cx
-	mov	[savedfilename + 4], cx
-	mov	[savedfilename + 6], cx
+	mov	[lengthxfer], cx
+	mov	[lengthxfer + 2], cx
 	mov	es, [buf1seg]
-.szlp	mov	[savedfilename + 8], ax
-	mov	[savedfilename + 10], dx
+.szlp	mov	[bp - 4], ax
+	mov	[bp - 2], dx
 	test	[opflags], byte opflag_c
 	jz	.ncbit
 	call	getbitsclust
 	test	ch, 1	; It's an orphaned chain that runs into a chain already reached
 	jnz	.trunc	; by a directory entry. Truncate it. We're already in recovery,
 			; no need to prompt.
-	mov	ax, [savedfilename + 8]
-	mov	dx, [savedfilename + 10]
+	test	di, 2
+	jz	.nss
+	push	di
+	call	scansomeclust
+	mov	es, [buf1seg]
+	jnc	.nss
+	call	newline
+	mov	dx, savedfilename
+	call	outstring
+	mov	dx, query_filebdsec
+	mov	cx, state_dir
+	call	queryfixyn
+	cmp	al, 'y'
+	jne	.nbads
+	mov	cx, zerosector
+	push	cx
+	xor	cx, cx
+	push	cx
+	push	word [reservedsects]
+	push	word [bp - 4]
+	push	word [bp - 2]
+	call	recoverbadsector
+	pop	di
+	mov	[bp - 2], dx
+	mov	[bp - 4], ax
+	test	di, 8
+	jnz	.nmark
+	mov	[clusterxfer], ax
+	mov	[clusterxfer + 2], dx
+	jmp	.nmark
+.nbads	pop	di
+.nss	mov	ax, [bp - 4]
+	mov	dx, [bp - 2]
 .ncbit	test	di, 1
 	jz	.nmark
 	mov	ch, 1
@@ -4024,29 +4187,33 @@ recoverlength_loopfix:		; DX:AX = cluster, DI = flags; destroys everything but B
 	call	setbitsclust
 	pop	dx
 	pop	ax
-.nmark	mov	cx, [bytesperclust]
-	add	[savedfilename + 4], cx
-	adc	[savedfilename + 6], word 0
+.nmark	or	di, 8
+	mov	cx, [bytesperclust]
+	add	[lengthxfer], cx
+	adc	[lengthxfer + 2], word 0
 	jnc	.nov
-	or	di, byte 2
+	or	di, byte 4
 .nov	push	di
 	call	getnextcluster
 	pop	di
-	cmp	[savedfilename], ax
+	cmp	[clusterxfer], ax
 	jne	.scec
-	cmp	[savedfilename + 2], dx
+	cmp	[clusterxfer + 2], dx
 	jne	.scec
-.trunc	mov	ax, [savedfilename + 8]
-	mov	dx, [savedfilename + 10]
+.trunc	mov	ax, [bp - 4]	; Cycle of the whole detected
+	mov	dx, [bp - 2]
 	call	setendchaininfats
 	jmp	.fin
 .scec	call	isendchainagnostic
-	jnc	.szlp
-.fin	test	di, 2
+	jc	.fin
+	jmp	.szlp
+.fin	test	di, 4
 	jz	.ret
-	mov	[savedfilename + 4], word 0FFFFh
-	mov	[savedfilename + 6], word 0FFFFh
-.ret	ret
+	mov	[savedfilename + 12], word 0FFFFh
+	mov	[savedfilename + 14], word 0FFFFh
+.ret	mov	sp, bp
+	pop	bp
+	ret
 
 recovernamedir:
 	cmp	[fattype], byte 16
@@ -4438,6 +4605,55 @@ initdircluster:
 	pop	ax
 	ret
 
+scanfreeclust:
+	cmp	dx, [highestclust + 2]
+	jb	.scan
+	cmp	ax, [highestclust]
+	jb	.scan
+	ret
+.scan	push	ax
+	push	dx
+	call	scansomeclust
+	jc	.bad
+	pop	dx
+	pop	ax
+	ret
+.bad	mov	cx, state_fc
+	mov	dx, query_freebad
+	call	queryfixyn
+	cmp	al, 'y'
+	pop	dx
+	pop	ax
+	jne	.ret
+	mov	es, [buf1seg]
+	mov	bx, 0FFF7h
+	mov	cx, 0FFFh
+	push	cx
+	push	bx
+	call	setclusterinfats
+.ret	ret
+
+scansomeclust:
+	mov	es, [buf3seg]
+scansomeclustes:
+	call	sectorfromcluster
+	mov	cx, [sectsperclust]
+.loop	push	cx
+	push	ax
+	push	dx
+	xor	bx, bx
+	call	diskread
+	pop	dx
+	pop	ax
+	pop	cx
+	jc	.ret
+	mov	bx, [sectsperchunk]
+	add	ax, bx
+	adc	dx, 0
+	sub	cx, bx
+	jnz	.loop		; CF must be clear if zero
+.ret	ret
+
 init_zero:
 	xor	ax, ax
 	mov	cx, di
@@ -4455,36 +4671,48 @@ init_zero:
 
 init_c:	; Called from scanbitsclust replacing the scan line function
 	; ES:BX = buffer, DI = stop point, return CF set to write back
-	mov	dl, 1
+	xor	dx, dx
+	xor	si, si
+	mov	ah, 1
 .loop	mov	cl, [es:bx]
-	mov	al, cl
+	mov	ah, cl
 	and	al, 03h
 	cmp	al, 1
 	jne	.ni1
-	call	totalfilesinc
+	inc	dx
+	jnz	.ni1
+	inc	si
 .ni1	mov	al, cl
 	and	al, 0Ch
 	cmp	al, 4
 	jne	.ni2
-	call	totalfilesinc
+	inc	dx
+	jnz	.ni2
+	inc	si
 .ni2	mov	al, cl
 	and	al, 30h
 	cmp	al, 10h
 	jne	.ni3
-	call	totalfilesinc
+	inc	dx
+	jnz	.ni3
+	inc	si
 .ni3	mov	al, cl
 	and	al, 0C0h
 	cmp	al, 40h
 	jne	.ni4
-	call	totalfilesinc
+	inc	dx
+	jne	.ni4
+	inc	si
 .ni4	test	cl, 055h
 	jz	.nw
-	mov	dl, 0
+	mov	ah, 0
 	and	cl, 0AAh
 	mov	[es:bx], cl
 .nw	inc	bx
 	cmp	bx, di
 	jne	.loop
+	add	[totalfiles], dx
+	adc	[totalfiles + 2], si
 	cmp	dl, 1	; set CF if we cleared any "reached" bits
 	ret
 
@@ -5012,7 +5240,7 @@ scanbitsclust:
 	pop	cx
 	pop	bx
 	pop	ax
-.matchr	ret
+	ret
 
 ;Routines used by FAT repair
 ;bp - 16: number of words in a FAT block
@@ -5046,7 +5274,7 @@ fat_copy:
 	;[bp - 18] = entries per block
 fat_quantify:
 	push	es
-	mov	es, [buf4seg]
+	mov	es, [bufscribbleseg]
 	pop	ds
 	call	fat_copy
 	push	cs
@@ -5466,6 +5694,8 @@ diskwrite:
 	jmp	exit_nofix
 
 	; Reads sector to buffer if not already in buffer; trashes BX, CX, SI, DI
+	; While diskread0 sets the cache read data; it assumes the caller knows
+	; if it's invalid or not.
 	; CF is set on error
 diskread0:
 	xor	bx, bx
@@ -5495,23 +5725,12 @@ setbufsector:
 	jne	.n1
 	mov	[buf1sector], ax
 	mov	[buf1sector + 2], dx
-	jmp	.n4
+	ret
 .n1	cmp	bx, [buf2seg]
 	jne	.n2
-	mov	[buf2sector], ax
-	mov	[buf2sector + 2], dx
-	jmp	.n4
-.n2:
-;	cmp	bx, [buf3seg]		; buf3seg is only used in FAT pass, so
-;	jne	.n3			; there's no case where a cache hit can happen
-;	mov	[buf3sector], ax
-;	mov	[buf3sector + 2], dx
-;	jmp	.n4
-.n3	cmp	bx, [buf4seg]
-	jne	.n4
-	mov	[buf4sector], ax
-	mov	[buf4sector + 2], dx
-.n4	ret
+	mov	[buf2sector], ax	; only buffers 1 and 2 an ever be FAT data
+	mov	[buf2sector + 2], dx	; while the cache is in use
+.n2	ret				; (buf3 seg can be FAT data during FAT loop)
 
 diskread:
 	xor	cx, cx
@@ -5697,6 +5916,7 @@ msg_usage	db	'SSDSCAN beta1', 13, 10
 		db	'/F   Fix errors without prompting', 13, 10
 		db	'/T   Test only: fix nothing', 13, 10
 		db	'/C   Check chain length against file length & check for cycles', 13, 10
+		db	'/S   Perform read-only surface scan', 13, 10
 		db	'/B   Retest clusters currently marked bad', 13, 10
 		db	'/Z   Recovery directories that have zeroed sectors in the middle', 13, 10
 		db	'     (caution: 0 is normally the directory terminator; can damage FS instead)', 13, 10
@@ -5714,6 +5934,7 @@ state_mediaq	db	13, 10
 state_media	db	        'Media Descriptor     : $'
 state_fat	db	13, 10, 'File Allocation Table: $'
 state_dir	db	13, 10, 'Directory Structure  : $'
+state_fc	db	13, 10, 'Free Clusters        : $'
 out_cr		db	13, '$'
 %ifndef SEVENBIT
 out_check	db	251, "  $"
@@ -5764,8 +5985,10 @@ query_xlinkfile	db	" refers to a crosslinked cluster, delete?$"
 query_dirnot	db	" is marked as a directory but seems to not be, select(F,D)$"
 query_fixemptyd	db	" is marked as a directory but is an empty file, fix?$"
 query_fixdotdot	db	" has a broken .. entry, fix?$"
+query_filebdsec	db	" has a bad sector, replace?$"
 query_dirbadsec	db	"Bad sector encountered reading directory, replace?$"
 query_fixtail	db	"Bad sector marker encountered at end of directory, repair directory?$"
+query_freebad	db	"Bad sector encountered in free space, mark?$"
 query_fixbadlen	db	" has an impossible length, fix?$"
 query_fixbadptr	db	" has a bad block in chain, truncate?$"
 query_xlink2	db	" has a crosslinked cluster, repair?$"
@@ -5812,7 +6035,7 @@ isbadcluster	resb	2
 ismdesc		resb	2
 getdircluster	resb	2
 setdircluster	resb	2
-		resb	4
+lengthxfer	resb	4
 zerothclustsect	resb	4		; Optimization hack: direct multiply and add to get sector
 xmsfunc		resb	4
 
@@ -5828,8 +6051,9 @@ buf4seg		resb	2
 
 buf1sector	resb	4
 buf2sector	resb	4
-buf3sector	resb	4
-buf4sector	resb	4
+clusterxfer	resb	4
+		resb	2
+bufscribbleseg	resb	2
 
 reservedsects	resb	2
 bytespersector	resb	2
@@ -5899,6 +6123,7 @@ opflag_b	equ 8
 opflag_z	equ 16
 opflag_x	equ 32
 opflag_t	equ 64
+opflag_s	equ 128
 opflag2_bigdisk	equ 1
 opflag2_7305	equ 2
 opflag2_ebpb	equ 4

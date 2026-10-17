@@ -20,7 +20,8 @@ only 64MB of XMS would be required, and therefore any computer posessing
 consider the number of XMS handles unless XMS is fragmented.
 
 When running on disk images mounted over the network, do not accept
-prompts to repair bad sector reads.
+prompts to repair bad sector reads. Bear in mind that SANs are networked
+even though it doesn't look like it.
 
 Options:
   /F  Passing /F fixes all errors without prompting. The only prompt that
@@ -33,6 +34,12 @@ Options:
   /B  Performs a read-only test on clusters currently marked bad.
       This should be done aftery copying the image to a new SSD, as
       bad sectors are not bad after a copy.
+  /S  Performs a read-only test on all clusters not currently marked bad.
+      On a normally running system, SSDs perform their own refresh of
+      sectors not written in a long time; however if the SSD spends most
+      of its life powered down, this does not happen. So, this reads every
+      sector, causing the SSD firmware to automatically perform ECC checks
+      and rewrite any flipped bits.
   /Z  Recovers directories that have zeroed sectors in the middle.
       Running ddrescue on a newly damaged disk image results in the
       recovery image containing zerod sectors wherever the original
@@ -164,13 +171,17 @@ Repairable errors in filesystems:
   - The directory attribute bit got toggled on a file.
   - The first sector of the directory got destroyed.
   - SSDSCAN is asking you what it is.
+* <<file>> has a bad sector
+  - Replaces the bad cluster, recovering readable sectors
 * <<file>> is marked as a directory but is an empty file.
 * <<dir>> has a broken .. entry
 * Bad sector encountered reading directory
-  - Replaces the bad sector; you probably lost files
+  - Replaces the bad cluster; you probably lost files
 * Bad sector marker encountered reading directory
   - Replaces the bad sector and truncates the directory.
   - You probably lost some files.
+* Bad sector encountered in free space
+  - Marks the cluster bad
 * <<file>> has an impossible length
   - The length is set to the chain length.
 * Found lost directory
