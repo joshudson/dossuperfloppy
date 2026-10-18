@@ -1362,6 +1362,21 @@ stage_fat:
 	inc	di
 .notfirst:
 	;*NOW* we can scan the FAT and update bitmaps
+%ifdef DEBUG
+	mov	ax, [bp - 6]	; Expensive anti-memory-corruption check
+	mov	dx, [bp - 4]
+	call	getbitsclustdi
+	test	ch, 2
+	jz	.nmcorrupt
+	mov	ax, [bp - 4]
+	call	outax
+	mov	ax, [bp - 6]
+	add	ax, di
+	call	outax
+	call	newline
+	jmp	exit
+.nmcorrupt
+%endif
 	call	[entryfromblock]
 	or	dx, dx
 	jnz	.notfixendchain
@@ -1662,7 +1677,7 @@ stage_dirwalk:
 	test	[opflags], byte opflag_c
 	jnz	stage_recover		; Check for unreferenced loops
 	cmp	[pgdisplay], byte 100
-	jae	stage_finalize
+	jae	stage_freesurface
 
 	; Next: recover directories
 stage_recover:
@@ -1674,7 +1689,7 @@ stage_recover:
 	test	[opflags], byte opflag_c
 	jnz	.files			; Cycles aren't found by file counter
 	cmp	[pgdisplay], byte 100
-	jae	stage_finalize
+	jae	stage_freesurface
 
 	; Next: recover files (all in this stage because % measurement)
 .files	mov	cx, recoverfiles
@@ -4005,27 +4020,21 @@ recoverdirs:
 	pop	ax
 	mov	ch, 60h
 	call	diskwrite0
-	mov	sp, bp	; Will now call into descendtree
-	mov	ax, [savedfilename]		; from .create
-	mov	dx, [savedfilename + 2]
-	push	ax
-	push	dx
+	mov	ax, [clusterxfer]
+	mov	dx, [clusterxfer + 2]
 	mov	ch, 1
 	call	setbitsclust	; It's reached now
-	pop	dx
-	pop	ax
-	mov	si, [savedfilename]
+	mov	sp, bp	; Will now call into descendtree
+	mov	si, [savedfilename]		; from .create
 	mov	di, [savedfilename + 2]
-	push	ax
-	push	dx
-	xor	ax, ax
+	xor	dx, dx
 	mov	ax, [savedfilename + 4]
 	div	word [bytespersector]
 	mov	bx, dx
 	add	si, ax
 	adc	di, word 0
-	pop	dx
-	pop	ax
+	mov	ax, [clusterxfer]
+	mov	dx, [clusterxfer + 2]
 	call	descendtree
 	pop	bp	; Finally pop bp (can't earlier as descendtree does not save)
 	pop	dx	; Check if we finished or not
@@ -4035,7 +4044,7 @@ recoverdirs:
 	call	getbitsclust
 	pop	dx
 	pop	ax
-	cmp	ch, 2
+	cmp	ch, byte 2
 	jne	short	.f_ret
 	jmp	recoverdirs		; Still hanging: something up the chain must have not been a directory after all
 .create	mov	[savedfilename], ax		; Save location for descendtree
@@ -4608,15 +4617,18 @@ initdircluster:
 scanfreeclust:
 	cmp	dx, [highestclust + 2]
 	jb	.scan
+	ja	.ret0
 	cmp	ax, [highestclust]
 	jb	.scan
-	ret
+.ret0	ret
 .scan	push	ax
 	push	dx
 	call	scansomeclust
 	jc	.bad
 	pop	dx
 	pop	ax
+	mov	di, freeclust
+	call	incrementprogress
 	ret
 .bad	mov	cx, state_fc
 	mov	dx, query_freebad
@@ -4677,28 +4689,28 @@ init_c:	; Called from scanbitsclust replacing the scan line function
 .loop	mov	cl, [es:bx]
 	mov	ah, cl
 	and	al, 03h
-	cmp	al, 1
+	cmp	al, 2
 	jne	.ni1
 	inc	dx
 	jnz	.ni1
 	inc	si
 .ni1	mov	al, cl
 	and	al, 0Ch
-	cmp	al, 4
+	cmp	al, 8
 	jne	.ni2
 	inc	dx
 	jnz	.ni2
 	inc	si
 .ni2	mov	al, cl
 	and	al, 30h
-	cmp	al, 10h
+	cmp	al, 20h
 	jne	.ni3
 	inc	dx
 	jnz	.ni3
 	inc	si
 .ni3	mov	al, cl
 	and	al, 0C0h
-	cmp	al, 40h
+	cmp	al, 80h
 	jne	.ni4
 	inc	dx
 	jne	.ni4
@@ -4713,7 +4725,7 @@ init_c:	; Called from scanbitsclust replacing the scan line function
 	jne	.loop
 	add	[totalfiles], dx
 	adc	[totalfiles + 2], si
-	cmp	dl, 1	; set CF if we cleared any "reached" bits
+	cmp	ah, 1	; set CF if we cleared any "reached" bits
 	ret
 
 totalfilesinc:
@@ -5066,7 +5078,10 @@ scanbitsclust:
 	jz	.mide
 	push	di
 .mid	xor	di, di
+	push	bx
+	xor	bx, bx
 	call	.inner
+	pop	bx
 	push	ax
 	mov	ax, es
 	add	ax, 1000h
