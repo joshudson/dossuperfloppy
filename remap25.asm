@@ -27,7 +27,7 @@ ebrebrbasis	equ	100
 ebrdepth	equ	104
 
 _start:
-	jmp	main
+	jmp	near main
 shiftno	db	0
 
 usage:
@@ -42,6 +42,7 @@ usage:
 	db	"Copyright (C) Joshua Hudson 2025-26", 13, 10
 	db	"Usage: REMAP25 [/C|/L] disk", 13, 10
 	db	"Usage: REMAP25 [/C|/L[:shift]] disk partition Z: A:\SSDSCAN.COM Z: options", 13, 10, '$'
+	; /B doesn't show up in the help text; I don't want to add another output line
 
 error	db	"EXEC failed", 13, 10, '$'
 diskerr	db	"Disk Error", 13, 10, '$'
@@ -61,6 +62,31 @@ readnumber:
 	sub	al, '0'
 	add	bl, al
 	lodsb
+	jmp	.l
+.done	ret
+
+readbignumber:
+	xor	ax, ax
+	xor	dx, dx
+	mov	ch, 0
+	mov	bx, 10
+.l	mov	cl, [si]
+	inc	si
+	sub	cl, '0'
+	jb	.done
+	cmp	cl, 9
+	ja	.done
+	mov	di, dx
+	mul	bx
+	push	ax
+	xchg	ax, di
+	mov	di, dx
+	mul	bx
+	xchg	ax, dx
+	add	dx, di
+	pop	ax
+	add	ax, cx
+	adc	dx, 0
 	jmp	.l
 .done	ret
 
@@ -383,6 +409,7 @@ loadlist:
 	mov	[ahaction], byte 2h
 	cmp	[type], byte 'L'
 	je	.lbaaccess
+	clc
 	jmp	chsdiskaccess
 .lbaaccess:
 	xor	di, di
@@ -420,14 +447,13 @@ main:
 	cmp	al, '/'
 	jne	.nopt
 	lodsb
+	and	al, ~('a' - 'A')
 	cmp	al, 'L'
 	je	.olba
-	cmp	al, 'l'
-	je	.olba
-	cmp	al, 'c'
-	je	.ochs
 	cmp	al, 'C'
 	je	.ochs
+	cmp	al, 'B'
+	je	.obad
 .uv	jmp	usage
 .olba	mov	[type], byte 'L'
 	cmp	[si], byte ':'
@@ -441,6 +467,14 @@ main:
 	mov	[shiftno], bl
 	jmp	.p1
 .ochs	mov	[type], byte 'C'
+	jmp	.p1
+.obad	mov	[shiftno - 1], byte 0
+	cmp	[si], byte ':'
+	jne	.lobad
+	inc	si
+.lobad	call	readbignumber
+	mov	[int2526error.elo - 2], ax
+	mov	[int2526error.ehi - 2], dx
 	jmp	.p1
 .nopt	cmp	al, '1'
 	jb	.uv
@@ -547,7 +581,7 @@ havepart:
 programbuilder:
 	mov	ah, 0Dh		; Don't mess things up if the user mapped it
 	int	21h		; over the damaged drive they're trying to check.
-	mov	bl, [shiftno]
+	mov	bx, [shiftno - 1]
 	mov	di, programstart
 	mov	si, error
 	mov	cx, fcbbase - error
@@ -576,11 +610,15 @@ programbuilder:
 	mov	[vector2], ax
 	mov	[vector2 + 2], dx
 	mov	si, int26entry
-	cmp	bl, 0
-	jne	.shift
-	mov	cx, chsdiskaccess - int26entry
+	mov	cx, int2526error - int26entry
 	rep	movsb
-	jmp	.pshift
+	cmp	bl, 0
+	jne	.mshift
+	mov	si, int2526error
+	mov	cx, int2526error.ok - int2526error
+	rep	movsb
+.mshift	cmp	bh, 0
+	je	.pshift
 .shift	mov	cx, int2526add - int26entry
 	rep	movsb
 	mov	si, shiftprefix
@@ -590,17 +628,17 @@ programbuilder:
 .shiftl	mov	si, shiftdrive
 	mov	cx, shiftdrive_end - shiftdrive
 	rep	movsb
-	dec	bl
+	dec	bh
 	jnz	.shiftl
 	pop	bx
-	mov	si, int2526add
+.pshift	mov	si, int2526add
 	mov	cx, chsdiskaccess - int2526add
 	rep	movsb
-.pshift	cmp	[type], byte 'L'
+	cmp	[type], byte 'L'
 	jne	.chs
 	mov	si, lbadiskaccess
 	mov	cx, lbadiskaccess.end - lbadiskaccess
-	cmp	bl, 0
+	cmp	bh, 0
 	je	.acc
 	mov	si, lbadiskaccess.shift
 	mov	cx, lbadiskaccess.end - lbadiskaccess.shift
@@ -680,7 +718,7 @@ int26entry:
 	je	.i26e
 	jmp	far [cs:vector2]
 .i26e	mov	[cs:ahaction], byte 03h
-	jmp	int2526common
+	;jmp	int2526common
 int2526common:
 	cmp	cx, 0FFFFh
 	je	.big
@@ -708,6 +746,17 @@ int2526common:
 	retf
 .lg	cmp	cx, 255
 	ja	.cb
+
+int2526error:
+	cmp	ax, 0F8F7h
+.elo	jne	.ok
+	cmp	dx, 0F8F7h
+.ehi	jne	.ok
+	mov	ax, 1008h
+	stc
+	retf
+.ok:
+
 int2526add:
 	add	ax, [offset]
 	adc	dx, [offset + 2]
@@ -792,11 +841,10 @@ programtail:
 	mov	[es:26h * 4 + 2], dx
 	sti
 	jnc	.exit
-	push	ax
 	mov	ah, 9
 	mov	dx, programstart
 	int	21h
-	pop	ax
+	mov	al, 255
 	jmp	.exit2
 .exit	mov	ah, 4Dh
 	int	21h
