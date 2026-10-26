@@ -1229,7 +1229,7 @@ stage_fat:
 	jmp	.quantify_apply_finished
 
 .quantify_loop:
-	mov	ch, 0
+	mov	ch, 1
 	shl	ch, cl
 	test	[bp - 2], ch
 	jnz	.quantify_worse
@@ -1294,6 +1294,8 @@ stage_fat:
 	jz	.quantify_noapply
 .quantify_mustapply:
 	call	fat_copy
+	test	[opflags], byte opflag_t
+	jnz	.quantify_noapply		; Fix nothing overrides even blind write back of bad FAT hoping to fix it
 	or	[bp - 1], ch
 .quantify_noapply:
 	pop	ds
@@ -1375,7 +1377,7 @@ stage_fat:
 	call	outax
 	call	newline
 	jmp	exit
-.nmcorrupt
+.nmcorrupt:
 %endif
 	call	[entryfromblock]
 	or	dx, dx
@@ -1429,7 +1431,6 @@ stage_fat:
 	pop	di
 	pop	es
 	jc	.isbadcluster	; Still bad
-	pop	es
 	mov	ax, [bp - 6]
 	mov	dx, [bp - 4]
 	call	getbitsclustdi
@@ -1521,11 +1522,6 @@ stage_fat:
 .fixallocfarbefore:
 	push	es
 	mov	es, [bufscribbleseg]	; Load prior into scribble and set end of chain
-	;push	ax
-	;push	dx
-	;call	invalidatesector
-	;pop	dx
-	;pop	ax
 	call	setendchaininfats
 	pop	es
 .notoverlarge:		; Technically the label is correct, the entry is not over the maximum size
@@ -1728,6 +1724,7 @@ stage_finalize:
 	xor	dx, dx		; FAT info sector check
 	mov	es, [buf1seg]
 	call	diskread0
+	jc	.ninfo
 	mov	ax, [es:0]
 	cmp	ax, 0
 	je	.irebuild
@@ -3809,12 +3806,23 @@ alloccluster:
 	call	outstring
 	jmp	exit_nofix
 .found	cmp	dx, [highestclust + 2]	; When scanning for zeros, scanbitsclust can return
-	jb	.found2			; a few cells too many. Don't try to allocate them.
+	jb	.found3			; a few cells too many. Don't try to allocate them.
 	ja	.never
 	cmp	ax, [highestclust]
-	jb	.found2
+	jb	.found3
 .never	ret
-.found2	call	scanbitsclust.unwind
+;This routine doesn't make a lot of sense in the modern world.
+;While bad clusters can still exist; writing to a bad cluster in entirety triggers a remap.
+;So scanning it makes no sense.
+;.found2	test	[opflags], byte opflag_s
+;	jz	.found3
+;	push	ax
+;	push	dx
+;	call	scansomeclust
+;	pop	dx
+;	pop	ax
+;	jc	.never
+.found3	call	scanbitsclust.unwind
 	mov	sp, bp		; longjmp!
 	pop	bp
 	pop	cx		; Trash
@@ -5503,13 +5511,13 @@ calcoffset12:
 	ret
 
 entriestowords12:
-	shl	ax, 1
-	mov	di, 3
-	div	di
-	or	dx, dx
-	jz	.ret
-	inc	ax
-.ret	ret
+	mov	dx, ax			; AX=ceil(AX*3/4)
+	add	ax, dx
+	add	ax, dx
+	add	ax, 3
+	shr	ax, 1
+	shr	ax, 1
+	ret
 
 entriesperblock12:
 	mov	ax, [highestclust]
