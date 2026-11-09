@@ -121,6 +121,10 @@ _start:
 	je	.o3
 	cmp	al, 'B'
 	je	.o4
+	cmp	al, 'M'
+	je	.ohi
+	cmp	al, 'A'
+	je	.oa
 	cmp	al, 'Z'
 	je	.o5
 	cmp	al, 'X'
@@ -145,6 +149,10 @@ _start:
 .o7	or	bl, opflag_t
 	jmp	.b
 .o8	or	bl, opflag_s
+	jmp	.b
+.ohi	or	bh, opflag2_remap
+	jmp	.b
+.oa	mov	[lengthxfer + 3], byte 80h
 	jmp	.b
 .arg	mov	dx, msg_usage
 	call	outstring
@@ -177,7 +185,25 @@ stage_media_descriptor:
 	call	outstring
 	mov	ax, ds
 	add	ax, (stackbottom) / 16
-	mov	[buf1seg], ax
+	test	[lengthxfer + 3], byte 80h
+	jz	.nalign
+	mov	[lengthxfer], ax
+	xor	bx, bx
+	test	ax, 0FFFh
+	jz	.align
+	mov	bx, ax
+	add	ah, 10h
+	and	ax, 1000h
+	sub	bx, ax
+	neg	bx
+	mov	cx, ds
+	add	cx, ax
+	add	cx, 32768 / 16
+	cmp	cx, [cmem]
+	jbe	.align
+	jmp	initpools.nocmem2		; After align, can't scan anything
+.align	mov	[lengthxfer + 2], bx
+.nalign	mov	[buf1seg], ax
 	mov	[sectsperchunk], word 1
 
 	xor	ax, ax
@@ -816,6 +842,7 @@ initpools:
 	ja	.hcmema
 %endif
 	jnc	.hcmem
+.nocmem2:
 	mov	dx, msg_nocmem2
 	call	outstring
 	jmp	exit_nofix
@@ -824,7 +851,18 @@ initpools:
 	call	.mcrec0p
 .hcmem:
 %ifndef FORCE_API
-	mov	cx, cs	; trick: no memory is initialized until all is allocated
+	mov	ax, [lengthxfer + 2]
+	test	ax, ax
+	jz	.asdone
+	mov	cx, 6
+	xor	dx, dx
+.asloop	shl	ax, 1
+	rcl	dx, 1
+	loop	.asloop
+	mov	cx, [lengthxfer]
+	mov	bl, b_mem_internal
+	call	.mcrec0
+.asdone	mov	cx, cs	; trick: no memory is initialized until all is allocated
 	mov	bl, b_mem_internal
 	mov	di, 64
 	mov	ax, (.hmem - _start + 64) * 4
@@ -846,17 +884,37 @@ initpools:
 	int	21h
 	;mov	[2Ch], word 0	; Don't actually need to do this, DOS doesn't work like that
 	; Link in UMBs as we can use them just fine
-.nfenv	mov	ax, 5802h
-	cmp	al, 0
-	jne	.nlink
+.nfenv	mov	ax, 3000h
+	int	21h
+	mov	[vfatsum], al
+	cmp	al, 5
+	jb	.nfasc		; Don't do this below DOS 5; strategy 80h is undefined on DOS 2
+	mov	ax, 5802h
+	int	21h
+	mov	[preserve_bp], al
 	mov	ax, 5803h
 	mov	bx, 1
 	int	21h
-	jc	.nlink
-	or	[opflags + 1], byte opflag2_ulink
-.nlink:	; Allocate DOS memory; early limit to avoid breaking down in the rare case of excessive fragmentation
-	mov	di, bitvectorptrs + bitvectorrlen * 60
+	mov	ax, 5800h
+	int	21h
+	mov	[preserve_bp + 1], ah
+	mov	ax, 5801h
+	mov	bx, 80h
+	int	21h
+	; Allocate DOS memory; early limit to avoid breaking down in the rare case of excessive fragmentation
+.nfasc	mov	di, bitvectorptrs + bitvectorrlen * 60
 	call	.dosalloc
+	pushf
+	cmp	[vfatsum], byte 5
+	jb	.nfasc2
+	mov	bl, [preserve_bp + 1]
+	mov	bh, 0
+	mov	ax, 5801h
+	int	21h
+	mov	bl, [preserve_bp]
+	mov	ax, 5803h
+	int	21h
+.nfasc2	popf
 	jc	.hmem
 %endif
 	mov	ax, 4300h
@@ -1418,6 +1476,42 @@ stage_fat:
 .notfree:
 	call	[isbadcluster]
 	jne	.notbadblock
+	test	[opflags + 1], byte opflag2_remap
+	jz	.notrewritebad
+	mov	ax, [bp - 6]
+	mov	dx, [bp - 4]
+	add	ax, di
+	adc	dx, 0
+	push	es
+	mov	es, [bufscribbleseg]
+	push	di
+	xor	di, di
+	push	ax
+	mov	ax, [bytespersector]
+	mul	word [sectsperchunk]
+	shr	ax, 1
+	xchg	ax, cx
+	xor	ax, ax
+	rep	stosw
+	pop	ax
+	call	sectorfromcluster
+	mov	cx, [sectsperclust]
+.rewritebadloop:
+	push	ax
+	push	dx
+	push	cx
+	mov	ch, 60h
+	call	diskwrite0
+	pop	cx
+	pop	dx
+	pop	ax
+	add	ax, [sectsperchunk]
+	adc	dx, 0
+	sub	cx, [sectsperchunk]
+	jnz	.rewritebadloop
+	pop	di
+	pop	es
+.notrewritebad:
 	test	[opflags], byte opflag_b
 	jz	.isbadcluster
 	mov	ax, [bp - 6]
@@ -1822,12 +1916,7 @@ exit:
 .fdone	add	si, bitvectorrlen
 	cmp	si, bitvectorptrs + bitvectorrlen * 128
 	jb	.free
-.fdone2	test	[opflags + 1], byte opflag2_ulink
-	jne	.numb
-	mov	ax, 5803h
-	xor	bx, bx
-	int	21h
-.numb	pop	ax
+.fdone2	pop	ax
 	int	21h
 
 ctrlchandler:
@@ -2270,19 +2359,20 @@ descendtree:
 	cmp	[es:si + 6], dx
 	jne	.readdircluster
 
-	div	word [ENTRIESPERCHUNK]
+	mov	cx, [ENTRIESPERCHUNK]
+	div	cx
 	mov	di, dx	; Entry within chunk
-	mul	word [sectsperchunk]
+	mul	word [sectsperchunk]	; AX = starting sector of chunk from root dir sector
 
 	; Read root directory entry
+	mov	dx, cx
 	mov	bx, [rootdirentries]
-	mov	ax, [ENTRIESPERCHUNK]
-	dec	ax
-	and	ax, bx
+	dec	cx
+	and	cx, bx			; I'm hurting my brain man
 	jz	.rootdirentrieswhole
-	xchg	ax, bx
+	mov	dx, cx
 .rootdirentrieswhole:
-	mov	[ENTRIESTHISCHUNK], bx
+	mov	[ENTRIESTHISCHUNK], dx
 	xor	dx, dx
 	add	ax, [rootdirsect]
 	adc	dx, [rootdirsect + 2]
@@ -2308,7 +2398,9 @@ descendtree:
 	cmp	[B2SEGSEC], ax		; buffer were trashed, we can force reload
 	jne	.readdirchunkcachemiss
 	cmp	[B2SEGSEC + 2], dx
-	je	.postreaddirbadsector
+	jne	.readdirchunkcachemiss
+.postreaddirbadsectorv:
+	jmp	.postreaddirbadsector
 .readdirchunkcachemiss:
 	and	[DFLAGS], byte 0FEh
 	mov	[B2SEGSEC + 2], dx
@@ -2319,17 +2411,56 @@ descendtree:
 	call	diskread0
 	pop	di
 	pop	si
-	jnc	.postreaddirbadsector
+	jnc	.postreaddirbadsectorv
 	mov	es, [buf4seg]
 	mov	cx, [es:si + 4]
 	or	cx, [es:si + 6]
 	jz	.readrootdirbadsector
 	jmp	.readdirbadsector
 .readrootdirbadsector:
-	; A bad sector in the root directory is not recoverable.
+	; A bad sector in the root directory can't be swapped: try to rewrite it
+	push	si
+	push	di
+	push	ax
+	push	dx
 	mov	dx, msg_rootbadsect
 	call	outstring
+	test	[opflags], byte opflag_t
+	jnz	.rootbadreadfill
 	jmp	exit_nofix
+.rootbadreadfill:	; Rewrite root dir sector, triggering a remap
+	mov	es, [buf2seg]
+	pop	dx
+	pop	ax
+	push	ax
+	push	dx
+	mov	cx, [sectsperchunk]
+	push	cx
+	mov	[sectsperchunk], word 1
+	xor	bx, bx
+.rootbadreadloop:
+	push	ax
+	push	dx
+	push	cx
+	push	bx
+	call	diskread
+	pop	bx
+	pop	cx
+	pop	dx
+	pop	ax
+	mov	di, bx
+	call	.recbadsectorfill
+	add	bx, [bytespersector]
+	add	ax, 1
+	adc	dx, 0
+	loop	.rootbadreadloop
+	pop	word [sectsperchunk]
+	pop	dx
+	pop	ax
+	mov	ch, 40h
+	call	diskwrite0
+	pop	di
+	pop	si
 .postreaddirbadsector:			; means after the bad sector check on readdir
 	mov	ah, 0Bh
 	int	21h			; Checks for ^C as INT 25h doesn't
@@ -3603,6 +3734,8 @@ descendtree:
 	stc				; From here it's the normal filler
 .recbadsectorfill:
 	jnc	.recbadsectorfill_done
+	mov	bx, di
+	add	bx, [bytespersector]
 	mov	ax, 20E5h
 	stosw			; 0
 	mov	ax, '  '
@@ -3617,7 +3750,7 @@ descendtree:
 	mov	ah, 0
 	mov	cx, 9		; E-1E
 	stosw
-	cmp	di, [bytespersector]
+	cmp	di, bx
 	jb	.recbadsectorfill
 	ret
 .recbadsectorfill_getdotdot:	; This code is really dirty
@@ -3806,22 +3939,19 @@ alloccluster:
 	call	outstring
 	jmp	exit_nofix
 .found	cmp	dx, [highestclust + 2]	; When scanning for zeros, scanbitsclust can return
-	jb	.found3			; a few cells too many. Don't try to allocate them.
+	jb	.found2			; a few cells too many. Don't try to allocate them.
 	ja	.never
 	cmp	ax, [highestclust]
 	jb	.found3
 .never	ret
-;This routine doesn't make a lot of sense in the modern world.
-;While bad clusters can still exist; writing to a bad cluster in entirety triggers a remap.
-;So scanning it makes no sense.
-;.found2	test	[opflags], byte opflag_s
-;	jz	.found3
-;	push	ax
-;	push	dx
-;	call	scansomeclust
-;	pop	dx
-;	pop	ax
-;	jc	.never
+.found2	test	[opflags + 1], byte opflag2_remap
+	jnz	.found3
+	push	ax
+	push	dx
+	call	scansomeclust
+	pop	dx
+	pop	ax
+	jc	.never
 .found3	call	scanbitsclust.unwind
 	mov	sp, bp		; longjmp!
 	pop	bp
@@ -6153,7 +6283,7 @@ opflag2_ebpb	equ 4
 opflag2_rclust	equ 8
 opflag2_nofix	equ 16
 opflag2_sbcpin	equ 32
-opflag2_ulink	equ 64
+opflag2_remap	equ 64
 opflag2_a20	equ 128
 
 error_nofix	equ 4
