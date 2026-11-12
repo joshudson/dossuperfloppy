@@ -3207,8 +3207,8 @@ descendtree:
 .scannotzero_e5:
 	mov	es, [buf4seg]
 	mov	bx, [UNWINDENTRY]
-	mov	dx, [UNWINDCLUSTER]
-	mov	ax, [UNWINDCLUSTER + 2]
+	mov	ax, [UNWINDCLUSTER]
+	mov	dx, [UNWINDCLUSTER + 2]
 	xchg	ax, [es:si + 4]		; Set exit point
 	xchg	dx, [es:si + 6]
 	xchg	bx, [es:si + 8]
