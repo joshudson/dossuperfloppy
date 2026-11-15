@@ -34,6 +34,8 @@ Options:
   /B  Performs a read-only test on clusters currently marked bad.
       This should be done aftery copying the image to a new SSD, as
       bad sectors are not bad after a copy.
+  /M  Attempts remap bad sectors by writing to them. If this fails, you
+      will get the "New bad sectors" error message.
   /S  Performs a read-only test on all clusters not currently marked bad.
       On a normally running system, SSDs perform their own refresh of
       sectors not written in a long time; however if the SSD spends most
@@ -63,6 +65,7 @@ Options:
       presumed alignment of the filesystem. If a FAT32 filesystem is created
       with FDISK, the presumed alignment will be pathological instead; however,
       so is normal disk access.
+  /A  Forces buffers to be aligned to a 64K boundary.
 
 Memory Errors:
 * Insufficient Conventional Memory to check any disk:
@@ -100,9 +103,8 @@ Unrepairable errors in filesystem:
   - Neither the boot sector nor any sector within range to be a potential
     backup boot sector contained something that looks like a BPB.
 * Encountered a bad sector trying to read media descriptor
-  - The first sector of the first FAT must not be physically bad;
-    this can be recovered by cloning the disk skipping bad sectors
-    and trying again.
+  - The first sector of all FATs is physically bad, or possibly this isn't
+    a FAT filesystem after all.
 * Media descriptor does not correspond to boot sector
   - This is not a FAT filesystem.
   - Quickformat has been interrupted.
@@ -146,6 +148,9 @@ Repairable errors in filesystems:
   - A hueristic is applied to select the best guess.
   - An all zeros sector is never the best guess.
   - An all ones sector is only the best guess if the other is all zeros.
+  - A bad sector in the FAT counts as a disagree and is fixed by writing
+    to it and attempting to trigger remapping. If this fails, this trips
+    the "new bad sectors" error message.
 * Anomalous record in FAT
   - One of the first two entries is wrong
 * Mid-allocation cluster value
@@ -207,10 +212,20 @@ Filenames with spaces in them are VALID filenames and are not corrected.
 The included RENAME1 utility can be used to give them names easier to
 work with.
 
+The intended procedure to recover bad sectors is as follows:
+1) Run SSDSCAN /S to identify bad sectors and recover data from adjacent
+   sectors.
+2) Run SSDSCAN /M to remap the (now free) bad sectors to spare sectors.
+   If this fails, replace the media.
+3) Power cycle the machine.
+4) Run SSDSCAN /B to verify the sectors are usable again.
+If you are 100% confident you have disabled write-behind cache you can
+run /M /B in the same pass.
+
 Recover backup boot sector is currently bugged in FreeDOS. The included
 REMAP25.COM can be used to recover it anyway.  The arguments to REMAP25 are
 hard disk number (starts with 1), partition number, and program to run:
-    REMAP25 1 1 Z: A:\SSDSCAN.COM Z: (options)
+    REMAP25 1 1 Z: A:\SSDSCAN.COM Z: [/A] (options)
 Running REMAP25 with just a disk number lists partitions on the disk.
 BONUS: can scan host system filesystem (up to 2TB) if given the device
 node as a disk. Assuming the file system image device is the second hard

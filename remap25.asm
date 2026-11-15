@@ -41,7 +41,7 @@ usage:
 	db	"Only raw disk access to the drive letter should be used.", 13, 10
 	db	"Copyright (C) Joshua Hudson 2025-26", 13, 10
 	db	"Usage: REMAP25 [/C|/L] disk", 13, 10
-	db	"Usage: REMAP25 [/C|/L[:shift]] disk partition Z: A:\SSDSCAN.COM Z: options", 13, 10, '$'
+	db	"Usage: REMAP25 [/C|/L[:shift]] disk partition Z: A:\SSDSCAN.COM Z: [/A] options", 13, 10, '$'
 	; /B doesn't show up in the help text; I don't want to add another output line
 
 error	db	"EXEC failed", 13, 10, '$'

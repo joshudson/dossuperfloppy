@@ -30,9 +30,26 @@ _start:
 	jne	.cpenv
 	cmp	[si + 6], word "E="
 	jne	.cpenv
-.skpenv	lodsb
+	movsw
+	movsw
+	movsw
+	movsw
+.advenv	lodsb
 	cmp	al, 0
-	jne	.skpenv
+	je	.skpenv
+	cmp	al, 9
+	je	.adven2
+	cmp	al, 32
+	jne	.advenv
+.adven2	lodsb
+	cmp	al, 0
+	je	.skpenv
+	cmp	al, 9
+	je	.adven2
+	cmp	al, 32
+	je	.adven2
+	jmp	.cpenvx
+.skpenv	sub	si, 8
 	jmp	.cpenvl
 .cpenv	lodsb
 	cmp	al, 0

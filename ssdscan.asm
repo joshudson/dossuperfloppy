@@ -1266,9 +1266,8 @@ stage_fat:
 
 	cmp	[numfats], byte 3
 	jb	.quantify_loop
-	mov	al, [bp - 2]		; Special case for 3 FATS
-	and	al, 6			; Check if 2 and 3 are equal
-	jnz	.quantify_loop
+	test	[bp - 2], byte 6	; Special case for 3 FATS
+	jnz	.quantify_loop		; Check if 2 and 3 are equal
 	mov	es, [buf3seg]
 	push	ds
 	mov	ds, [buf2seg]
@@ -1352,7 +1351,7 @@ stage_fat:
 	jz	.quantify_noapply
 .quantify_mustapply:
 	call	fat_copy
-	test	[opflags], byte opflag_t
+	test	[ss:opflags], byte opflag_t
 	jnz	.quantify_noapply		; Fix nothing overrides even blind write back of bad FAT hoping to fix it
 	or	[bp - 1], ch
 .quantify_noapply:
@@ -1363,6 +1362,7 @@ stage_fat:
 	jb	.quantify_apply_loop
 .quantify_apply_finished:
 
+	mov	ax, [bp - 2]
 	mov	al, [bp - 1]
 	or	al, [bp - 2]
 	xor	al, [bp - 2]
@@ -2426,7 +2426,7 @@ descendtree:
 	mov	dx, msg_rootbadsect
 	call	outstring
 	test	[opflags], byte opflag_t
-	jnz	.rootbadreadfill
+	jz	.rootbadreadfill
 	jmp	exit_nofix
 .rootbadreadfill:	; Rewrite root dir sector, triggering a remap
 	mov	es, [buf2seg]
@@ -3087,6 +3087,8 @@ descendtree:
 	call	recoverbadsector
 	pop	es
 .scannormal_surfacedone:
+	mov	[UNDOGETNEXTCLUSTER], ax
+	mov	[UNDOGETNEXTCLUSTER + 2], dx
 	call	getnextcluster
 	call	[isbadcluster]
 	jne	.scannormal_notbad
@@ -6063,7 +6065,7 @@ reservednames	db	"AUX     "
 		db	0
 lostfnd		db	"LOST    FND"
 
-msg_usage	db	'SSDSCAN beta1', 13, 10
+msg_usage	db	'SSDSCAN beta2', 13, 10
 		db	'Copyright (C) Joshua Hudson 2024-2026', 13, 10
 		db	'Usage: SSDSCAN DRIVE: [/F] [/C] [/D] [/B] [/Z]', 13, 10
 		db	'/F   Fix errors without prompting', 13, 10
@@ -6071,6 +6073,7 @@ msg_usage	db	'SSDSCAN beta1', 13, 10
 		db	'/C   Check chain length against file length & check for cycles', 13, 10
 		db	'/S   Perform read-only surface scan', 13, 10
 		db	'/B   Retest clusters currently marked bad', 13, 10
+		db	'/M   Attempt to remap by rewriting bad sectors', 13, 10
 		db	'/Z   Recovery directories that have zeroed sectors in the middle', 13, 10
 		db	'     (caution: 0 is normally the directory terminator; can damage FS instead)', 13, 10
 		db	'/X   Reserves the capacity to use /Z later', 13, 10
