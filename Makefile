@@ -92,6 +92,12 @@ minicom/MKDIR.COM: minicom/mkdir.asm
 minicom/REBOOT.COM: minicom/reboot.asm
 	nasm -f bin -o minicom/REBOOT.COM minicom/reboot.asm
 
+ssdhost.bin: ssdhost.asm
+	nasm -f bin -o ssdhost.bin ssdhost.asm
+
+FDEMUINF.COM: fdemuinf.asm
+	nasm -f bin -o FDEMUINF.COM fdemuinf.asm
+
 clean:
 	rm -f LICENSE.TXT FORMATHD.TXT PATCHDOS.COM FORMATHD.COM ISSF.COM FORMATHD.ZIP
 	rm -f SSDFMT.TXT SSDFMT.COM SSDFIXBT.COM POSTNTFS.EXE SSDFMT.ZIP RENAME1.COM REMAP25.COM

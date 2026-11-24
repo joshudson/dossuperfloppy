@@ -11,8 +11,8 @@
 ;	This API reports we exist and our status
 ;	Sets ds:[si + 10h] = ABABh; ds:[si + 2] = number of sectors (including bootstrap), ds:[si + 4] = starting sector, dl = underlying
 ; int13h ah=43h ds:[si] = 12h ds:[si + 2] = 0; ds:[si + 10h] = AABBh
-;	ah=0 Relocate here (buffer parameter is used; sector size is of buffer is 1 sector)
-;	ah=7F set readwrite   ah=FF set readonly
+;	al=0 Relocate here (buffer parameter is used; sector size is of buffer is 1 sector)
+;	al=7F set readwrite   al=FF set readonly
 
 ; Copyright (C) Joshua Hudson 2026
 
@@ -60,14 +60,10 @@ _start:
 	db	55h, 0AAh
 _loader:
 	jmp	near	loader
-ldr_type	db	0
-ldr_sectors	dw	18
-ldr_heads	dw	2
-ldr_cyls	dw	1
-ldr_unused	db	0
+	db	"IBM  2.0"
 ldr_bps		dw	512
 ldr_spc		db	0
-ldr_reserved	db	5
+ldr_reserved	dw	5
 ldr_fats	db	0
 ldr_rootdir	dw	0
 ldr_totalsector	dw	36
@@ -78,6 +74,7 @@ ldr_host_heads	dw	0
 ldr_hidden	dd	1
 ldr_logicbig	dd	0
 ldr_drive	db	0
+		db	0
 ldr_signature	db	28h	; Don't want volume label here
 ldr_serial	dd	0
 
@@ -137,8 +134,8 @@ loader:
 	adc	dx, 0
 	call	.disk
 	jc	.derr
-	mov	ax, [es:bx + 510]
-	mov	[es:bx - 2], ax	; Patchpoint: overwrite 55AA
+	mov	[es:7C01h], word (.derr - _loader - 3)
+	mov	[es:7BFEh], word 13CDh	; int 13h
 	jmp	.menu
 .derr	mov	si, 7C00h + .dmsg - _loader
 .error	call	.tty
@@ -181,11 +178,15 @@ loader:
 	pop	si
 .lbaend	ret
 
-.chs	push	ax
-	xor	ax, ax
+;CHS reads/writes are supposed to span heads, cylinders, however
+;There are too many *broken* BIOSes out there; so we can NOT do that.
+;Just do it one at a time
+;Checking for access past the end of the disk has been outsourced!
+;The only call that can actually do that is the move call...
+.chs	mov	[ctr], ax
+	push	ax
+.chsl	xor	ax, ax
 	xchg	ax, dx
-	cmp	dx, [host_sectors]
-	jae	.o
 	div	word [host_sectors]
 	push	ax
 	xchg	ax, cx
@@ -193,11 +194,7 @@ loader:
 	mov	cx, dx
 	inc	cx
 	pop	dx
-	cmp	dx, [host_heads]
-	jae	.o
 	div	word [host_heads]
-	cmp	ah, 3
-	ja	.o
 	mov	ch, al
 	ror	ah, 1
 	ror	ah, 1
@@ -205,23 +202,69 @@ loader:
 	mov	dh, dl
 	mov	dl, [disk]
 	pop	ax
+	mov	ah, [ctr + 1]
 	int	13h
-	ret
-.o	pop	ax
-	mov	ah, 4
-	stc
+	jc	.chsx
+	add	bx, 512
+	add	cx, 1
+	adc	dx, 0
+	dec	byte [ctr]
+	jnz	.chsl
+	clc
+.chsx	pop	dx
+	mov	al, dl
 .chsend	ret
 %ifdef FREEDOS
 .rmsg	db	"Insufficient RAM (need 159K)", 0
 %else
+	int3
 .rmsg	db	"Insufficient RAM (need 48K)", 0
 %endif
 .dmsg	db	"Error reading SSD", 0
-.menu	mov	si, 7C00h + .menutext - _loader
 	; End of code that must exist in the first sector
+	; But waste not, want not
+.copyright	db	"Copyright (C) Joshua Hudson 2026", 0
+.lbambr	mov	cx, [si + 8]
+	mov	bx, [si + 10]
+	mov	si, 0600h
+	mov	[si], word 10
+	mov	[si + 2], word 1
+	mov	[si + 4], word 7C00h
+	mov	[si + 6], es
+	mov	[si + 8], cx
+	mov	[si + 10], bx
+	mov	[si + 12], es
+	mov	[si + 14], es
+	ret
+.tiecommon:
+	shl	si, 1
+	shl	si, 1
+	mov	dx, es
+	xchg	ax, [si]
+	xchg	dx, [si + 2]
+	ret
+
+	times	503 - ($ - _loader) db 0
+.ldr_type	db	0	; 503
+.ldr_sectors	dw	18	; 504
+.ldr_heads	dw	2	; 506
+.ldr_cyls	dw	1	; 508
+.signature	db	055h, 0AAh
+
+.tie	mov	ax, [es:di]
+	call	.tiecommon
+	mov	[es:di], ax
+	mov	[es:di + 2], dx
+	ret
+.tiecodepatch:
+	mov	ax, [es:di + 1]
+	call	.tiecommon
+	mov	[es:di + 1], ax
+	mov	[es:di + 4], dx
+	ret
+
+.menu	mov	si, 7C00h + .menutext - _loader
 	call	.tty
-	mov	[es:7C01h], word (.derr - _loader - 3)
-	mov	[es:7BFEh], word 13CDh	; int 13h
 .key	mov	ah, 0
 	int	16h
 	cmp	al, '1'
@@ -229,13 +272,18 @@ loader:
 	cmp	al, '2'
 	je	.emergency
 	jmp	.key
-.normal	mov	si, 7BEh
-	mov	dl, [disk]
+.normal	mov	dl, [disk]
 	mov	bp, ds
-	xor	bx, bx
-	mov	ds, bx
-.nloop	mov	dh, [si + 1]
-	mov	cx, [si + 2]
+	mov	di, [offset]	 ; Sorry for this madness
+	mov	cx, [offset + 2] ; I'm really short on registers
+	xor	si, si
+	mov	ds, si
+	mov	si, 7BEh
+.nloop	cmp	[si + 4], di	; Skip us
+	jne	.nnn
+	cmp	[si + 6], cx
+	je	.nnext
+.nnn	mov	dh, [si + 1]
 	mov	ah, [si + 4]
 	cmp	ah, 0
 	je	.nnext
@@ -249,8 +297,6 @@ loader:
 	je	.nnext
 	cmp	ah, 0Fh
 	je	.nnext
-	cmp	ah, 011h
-	je	.nnext	; Us (HIDDEN FAT-12)
 	cmp	ah, 0Ch
 	je	.lban
 	cmp	ah, 0Eh
@@ -259,20 +305,11 @@ loader:
 	jb	.chsn
 	cmp	cx, 0FFFFh
 	jne	.chsn
-.lban	mov	cx, [si + 8]
-	mov	bx, [si + 10]
-	mov	si, 0600h
-	mov	[si], word 10
-	mov	[si + 2], word 1
-	mov	[si + 4], word 7C00h
-	mov	[si + 6], es
-	mov	[si + 8], cx
-	mov	[si + 10], bx
-	mov	[si + 12], es
-	mov	[si + 14], es
+.lban	call	.lbambr
 	mov	ax, 4200h
 	jmp	.ngo
-.chsn	mov	bx, 7C00h
+.chsn	mov	cx, [si + 2]
+	mov	bx, 7C00h
 	mov	ax, 0201h
 .ngo	jmp	0:7BFEh
 .nnext	add	si, 16
@@ -292,7 +329,7 @@ loader:
 	add	cx, 2
 	adc	dx, 0
 	mov	bx, 512 * 3
-	mov	ax, 0202h
+	mov	ax, 0202h	; 1KB-aligned 1KB read can't cross a 64K boundary
 	call	.disk
 	jc	.derr
 	
@@ -301,17 +338,17 @@ loader:
 	mov	ds, bx
 	; Tie in interrupt handlers
 	mov	si, 12h
-	mov	di, int12h_vector
-	call	.tie
+	mov	di, int12h_restore
+	call	.tiecodepatch
 	mov	si, 13h
 	mov	di, int13h_vector
 	call	.tie
 	mov	si, 19h
-	mov	di, int19h_vector
-	call	.tie
+	mov	di, int19h_restore
+	call	.tiecodepatch
 	mov	si, 1Eh
-	mov	di, int1Eh_vector
-	call	.tie
+	mov	di, int1Eh_restore
+	call	.tiecodepatch
 	mov	ds, bp
 	; Copy disk routine up
 	test	[ldr_haslba], byte 1
@@ -337,18 +374,16 @@ loader:
 	mov	ax, [es:host_sectors]
 	mov	dx, [es:host_heads]
 	mov	ds, bx
-	mov	ax, [7C04h]
+	mov	ax, [7C00h + .ldr_sectors - _loader]
 	mov	[es:floppy_sectors], ax
-	mov	ax, [7C06h]
+	mov	ax, [7C00h + .ldr_heads - _loader]
 	mov	[es:floppy_heads], ax
-	mov	ax, [7C13h]
+	mov	ax, [7C00h + .ldr_cyls - _loader]
+	mov	[es:floppy_cyls], ax
+	mov	ax, [7C13h]	; total size - 4 = floppy size
 	sub	ax, 4
 	mov	[es:floppy_size], ax
-	xor	dx, dx
-	div	word [es:floppy_heads]
-	div	word [es:floppy_sectors]
-	mov	[es:floppy_cyls], ax
-	mov	ah, [7C03h]
+	mov	ah, [7C00h + .ldr_type]
 	mov	[es:floppy_type], ah
 	and	ah, 7Fh
 	mov	al, [es:floppy_sectors]
@@ -357,7 +392,6 @@ loader:
 	mov	[es:int1Eh_entry.sectors], al
 	mov	[es:int1Eh_entry.max_track], cl
 	mov	[es:int1Eh_entry.drive_type], ah
-	mov	ds, bx
 	mov	es, bx
 	mov	bx, 7C00h
 	mov	ax, 0201h
@@ -365,17 +399,6 @@ loader:
 	xor	dx, dx
 	jmp	0:7BFEh
 
-.tie	shl	si, 1
-	shl	si, 1
-	mov	ax, [es:di]
-	mov	dx, es
-	xchg	ax, [si]
-	xchg	dx, [si + 2]
-	mov	[es:di], ax
-	mov	[es:di + 2], dx
-	ret
-.copyright	db	"Copyright (C) Joshau Hudson 2026"
-	
 .menutext	db	13, 10
 		db	"1) Boot Normal", 13, 10
 		db	"2) Boot Emergency", 13, 10
@@ -401,9 +424,6 @@ int1Eh_entry:
 
 int12h_entry:
 	mov	ax, [cs:ramkb]
-	nop
-	nop
-	nop
 	iret
 paramschsv:
 	jmp	int13h_entry.paramschs
@@ -630,10 +650,10 @@ int13h_entry:
 	jc	.lbasetrwexit
 	mov	cl, [bp - 4]
 	and	cl, 80h
-	mov	al, [es:bx + 3]
+	mov	al, [es:bx + 503]
 	and	al, 7Fh
 	or	al, cl
-	mov	[es:bx + 3], al
+	mov	[es:bx + 503], al
 	mov	cx, [offset]
 	mov	dx, [offset + 2]
 	mov	ax, 0301h
@@ -700,6 +720,7 @@ int13h_entry:
 	jc	.lbamoveexit
 	mov	cx, [offsetdest]
 	mov	dx, [offsetdest + 2]
+	mov	ah, 3
 	call	diskroutine
 	jc	.lbamoveexit
 	mov	cx, [offsetdelta]
@@ -759,41 +780,36 @@ int19h_entry:
 	mov	es, ax
 	mov	ax, cs
 	mov	ds, ax
-	mov	ax, [int12h_vector]
-	mov	dx, [int12h_vector + 2]
+int12h_restore:
+	mov	ax, int12h_entry
+	mov	dx, 0F000h
 	mov	es:[12h * 4], ax
 	mov	es:[12h * 4 + 2], dx
-	mov	ax, [int13h_vector]
-	mov	dx, [int13h_vector + 2]
-	mov	es:[13h * 4], ax
-	mov	es:[13h * 4 + 2], dx
-	mov	ax, [int19h_vector]
-	mov	dx, [int19h_vector + 2]
+int19h_restore:
+	mov	ax, int19h_entry
+	mov	dx, 0F000h
 	mov	es:[19h * 4], ax
 	mov	es:[19h * 4 + 2], dx
-	mov	ax, [int1Eh_vector]
-	mov	dx, [int1Eh_vector + 2]
+int1Eh_restore:
+	mov	ax, int1Eh_entry
+	mov	dx, 0F000h
 	mov	es:[1Eh * 4], ax
 	mov	es:[1Eh * 4 + 2], dx
+int13h_restore:
+	lds	ax, [int13h_vector]
+	mov	es:[13h * 4], ax
+	mov	es:[13h * 4 + 2], ds
 	int	19h
 	iret	; That's not good
 
 	align 2, db 0
 
-int12h_vector:
-	dw	int12h_entry
-	dw	0
 int13h_vector:
 	dw	int13h_entry
 	dw	0
-int19h_vector:
-	dw	int19h_entry
-	dw	0
-int1Eh_vector:
-	dw	int1Eh_entry
-	dw	0
 
 dap		dw	16, 0, 0, 0, 0, 0, 0, 0
+ctr		equ	dap + 2
 ramkb		dw	640
 floppy_size	dw	2880
 floppy_cyls	dw	80

@@ -11,8 +11,6 @@ int main(int argc, char **argv)
 	byte fbuffer[512];
 	byte pracbuf[512];
 	byte type = 0;
-	byte captive1 = 0;
-	byte captive2 = 0;
 	byte mediadescriptor = 0;
 	byte sectors = 0;
 	byte heads = 0;
@@ -244,10 +242,10 @@ int main(int argc, char **argv)
 		if (sectorsleft == 4) {
 			word reserved = fbuffer[0x0E] + ((word)fbuffer[0x0F] << 8) + 4;
 			word len = totalsectors + 4;
-			pracbuf[3] = type;
-			pracbuf[4] = sectors;
-			pracbuf[6] = heads;
-			pracbuf[8] = tracks;
+			pracbuf[503] = type;
+			pracbuf[504] = sectors;
+			pracbuf[506] = heads;
+			pracbuf[508] = tracks;
 			if (bpblen > pracbuf[1] + 3) bpblen = pracbuf[1] + 3;
 			memcpy(pracbuf + 11, fbuffer + 11, bpblen - 11);
 			pracbuf[0x0E] = reserved & 0xFF;
@@ -260,13 +258,6 @@ int main(int argc, char **argv)
 			pracbuf[0x21] = (len >> 8);
 			pracbuf[0x24] = 0x80;
 			pracbuf[0x26] = 0x28;
-			captive1 = pracbuf[510];
-			captive2 = pracbuf[511];
-			pracbuf[510] = 0x55;
-			pracbuf[511] = 0xAA;
-		} else if (sectorsleft == 3) {
-			pracbuf[510] = captive1;
-			pracbuf[511] = captive2;
 		}
 	}
 	for (word sectorsleft = totalsectors; sectorsleft --> 0;) {

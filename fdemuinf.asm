@@ -7,18 +7,14 @@ _start:
 	mov	dx, ram
 	mov	bl, 3
 	jmp	outstr
-.ram	mov	bx, (_end + 15 - _start + 100h) / 16
+.ram	mov	bx, _end
 	mov	ax, ds
-	add	bx, ax
-	lea	cx, [bx + 20h]
-	mov	ax, bx
-	and	ax, 0F000h
-	mov	dx, cx
-	and	dx, 0F000h
-	cmp	ax, dx
+	mov	cl, 4
+	shl	ax, cl
+	add	ax, bx
+	cmp	ax, 0E000h
 	jne	.keep
-	cmp	bp, sp
-	mov	bx, cx	; Buffer address
+	add	bx, 512
 .keep	mov	si, 81h
 .next	lodsb
 	cmp	al, ' '
@@ -38,6 +34,14 @@ _start:
 	mov	di, ro2
 	call	strxcmp
 	je	readonly
+	xor	bp, bp
+	mov	di, show
+	call	strxcmp
+	je	showf
+	inc	bp
+	mov	di, hide
+	call	strxcmp
+	je	showf
 	jmp	ask
 readonly:
 	mov	al, 0FFh
@@ -49,8 +53,8 @@ rorw:
 	mov	si, dap
 	mov	[si], word 12h
 	mov	[si + 2], dx
-	mov	[si + 4], dx
-	mov	[si + 6], bx
+	mov	[si + 4], bx
+	mov	[si + 6], es
 	mov	[si + 10h], word 0AABBh
 	mov	ah, 43h
 	int	13h
@@ -61,6 +65,40 @@ rorw:
 	jne	.error2
 .noemu	mov	dx, noemu
 .error2	jmp	outstr
+
+showf	mov	si, dap
+	xor	dx, dx
+	mov	[si], word 12h
+	mov	[si + 2], dx
+	mov	[si + 10h], word 0AABBh
+	mov	ax, 4200h
+	int	13h
+	jc	rorw.noemu
+	mov	dh, 0
+	mov	cx, 1
+	mov	ax, 0201h
+	int	13h
+	jc	rorw.error
+	mov	cx, 4
+	mov	ax, [si + 8h]
+	mov	di, [si + 10h]
+.loop	lea	si, [bx + 512 - 66]
+	cmp	[si + 8], ax
+	jne	.next
+	cmp	[si + 10], di
+	jne	.next
+	and	[si + 4], byte 0EFh
+	test	bp, bp
+	jnz	.hide
+	or	[si + 4], byte 10h
+.hide	mov	cx, 1
+	mov	ax, 0301h
+	int	13h
+	jc	rorw.error
+	ret
+.next	add	si, 16
+	loop	.loop
+	ret
 
 ask	mov	dx, copy
 	mov	ah, 9
@@ -87,8 +125,7 @@ ask	mov	dx, copy
 	mov	ah, 48h
 	mov	dl, 0
 	int	13h	; Can't fail now
-	mov	es, bx
-	xor	di, di
+	mov	di, _end
 	mov	si, emul1
 	mov	cx, emut1 - emul1
 	rep	movsb
@@ -170,7 +207,7 @@ ask	mov	dx, copy
 .sidep	rep	movsb
 	mov	ax, [dap + 4]
 	mov	dx, [dap + 6]
-	call	 number
+	call	number
 	mov	si, emuf4
 	mov	cx, emuf5 - emuf4
 	rep	movsb
@@ -198,9 +235,7 @@ ask	mov	dx, copy
 .nro	mov	al, '$'
 	stosb
 	mov	bl, 0
-	push	es
-	pop	ds
-	xor	dx, dx
+	mov	dx, _end
 outstr	mov	ah, 9
 	int	21h
 	mov	ax, 4Ch
@@ -247,6 +282,8 @@ ro1	db	15, "READONLY", 13
 rw1	db	15, "READWRITE", 13
 ro2	db	15, "RO", 13
 rw2	db	15, "RW", 13
+show	db	15, "SHOW", 13
+hide	db	15, "HIDE", 13
 emul1	db	"Emulating a "
 emut1	db	"5", 0ACh, " double density"
 emut2	db	"5", 0ACh, " high density"
