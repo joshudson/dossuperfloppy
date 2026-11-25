@@ -149,23 +149,39 @@ _start:
 .ochk	and	al, 0DFh
 	cmp	al, 'Y'
 	jne	.ny
-	or	[es:passedopts], byte 1
+	or	[es:passedopts], byte 1		; Don't prompt for overwrite
 .ny	cmp	al, 'O'
 	jne	.no
-	or	[es:passedopts], byte 4
+	or	[es:passedopts], byte 4		; Boot check
 .no	cmp	al, 'F'
 	jne	.nf
-	or	[es:passedopts], byte 16
+	or	[es:passedopts], byte 16	; Add to check table
 .nf	cmp	al, 'R'
 	jne	.nr
-	or	[es:passedopts], byte 32
-.nr	cmp	al, 'X'
+	or	[es:passedopts], byte 32	; Removable disk
+.nr	cmp	al, 'T'
+	jne	.nt
+	or	[es:passedopts], byte 64	; Pre-NTFS
+.nt	cmp	al, 'X'
 	jne	.lchk
-	or	[es:passedopts], byte 128
+	or	[es:passedopts], byte 128	; Exit
 .lchk	cmp	al, 13
 	jne	.loop
 	pop	ds
 .nargs:
+	mov	si, dap
+	xor	dx, dx
+	mov	ax, 4200h
+	mov	[hostlen], dx
+	mov	[si + 2], dx
+	mov	[si + 10h], word 0AABBh
+	int	13h
+	jc	.noemu
+	cmp	[si + 10h], word 0ABABh
+	jne	.noemu
+	mov	ax, [si + 2]
+	mov	[hostlen], ax
+.noemu:
 
 	; Enumerate disks
 	mov	dl, 80h
@@ -406,8 +422,21 @@ mainscreen:
 	call	out_string
 	pop	dx
 	inc	dh
+	push	dx
+	mov	si, s_ntmod
+	mov	cx, 13
+	call	out_stringat
+	mov	si, s_on
+	test	[passedopts], byte 64
+	jz	.nton
+	mov	si, s_off
+.nton	mov	cx, 3
+	call	out_string
+	pop	dx
+	inc	dh
 	mov	si, s_esc
 	mov	cx, 9
+	mov	bx, 7		; In case of no disks
 	call	out_stringat
 
 keyboarddisk:
@@ -427,7 +456,13 @@ keyboarddisk:
 	jne	.notbc
 .bc	xor	[passedopts], byte 4
 	jmp	mainscreen
-.notbc	cmp	al, '1'
+.notbc	cmp	al, 'T'
+	je	.nt
+	cmp	al, 't'
+	jne	.notnt
+.nt	xor	[passedopts], byte 64
+	jmp	mainscreen
+.notnt	cmp	al, '1'
 	jb	keyboarddisk
 .kid	mov	dl, [numdisks]
 	add	dl, '0'
@@ -439,7 +474,26 @@ keyboarddisk:
 havedisk:
 	mov	[disk], dl
 	call	diskclearlast
-	mov	dl, [disk]
+	xor	dx, dx
+	mov	[hostoffset], dx
+	mov	[hostoffset + 2], dx
+	mov	[hostlen], dx
+	mov	si, dap
+	mov	[si], word 12h
+	mov	[si + 2], dx
+	mov	[si + 10h], word 0AABBh
+	mov	ah, 42h
+	int	13h
+	jc	.nhost
+	cmp	dl, [disk]
+	jne	.nhost
+	mov	ax, [si + 4]
+	mov	dx, [si + 6]
+	mov	si, [si + 2]
+	mov	[hostoffset], ax
+	mov	[hostoffset + 2], dx
+	mov	[hostlen], si
+.nhost	mov	dl, [disk]
 
 	mov	es, [blockseg]
 	xor	bx, bx
@@ -662,9 +716,7 @@ havedisk:
 	; Fine. Make a small disk.
 mkfat12	mov	bp, 0A000h
 	call	chsdisksize
-	mov	bx, [di + 2]
-	mov	cx, [di + 4]
-	mov	si, [di + 6]
+	call	calchostreduce
 	or	dx, dx		; MS-DOS before 3.0 can't access disk sectors past 32 MB due to 16 bit math in disk geometry
 	jz	.n64k
 	xor	ax, ax
@@ -694,7 +746,7 @@ mksmallcommon:
 	; Got here trying to make a FAT16; that is, anything below DOS 7.1
 mkfat16	mov	bl, al
 	call	chsdisksize	; Use CHS size in case whole isn't CHS accessible
-	mov	ax, [di + 2]	; Use CHS size in case whole isn't LBA accessible
+	call	calchostreduce
 	or	dx, dx		; Size is in DX:AX
 	jnz	.i64k
 	cmp	ah, 0
@@ -766,7 +818,31 @@ mkfat32	mov	bl, al
 	;jmp	mkall
 
 mkall:
-	xor	ax, ax
+	xor	cx, cx
+	cmp	[hostlen], cx
+	je	.phost
+	mov	ax, [hostnewoffset]
+	mov	dx, [hostnewoffset + 2]
+	cmp	ax, [hostoffset]
+	jne	.mhost
+	cmp	dx, [hostoffset + 2]
+	jne	.phost
+.mhost	mov	si, dap
+	mov	[si], word 12h
+	mov	[si + 2], cx
+	mov	[si + 10h], word 0AABBh
+	mov	bx, [blockseg]
+	mov	[si + 4], cx
+	mov	[si + 6], bx
+	mov	[si + 8], ax
+	mov	[si + 10], dx
+	mov	[si + 12], cx
+	mov	[si + 14], cx
+	mov	dl, 0
+	mov	ax, 4300h
+	int	13h
+	jc	.error
+.phost	xor	ax, ax
 	xor	dx, dx
 	xor	bx, bx
 	xor	cx, cx
@@ -814,6 +890,10 @@ calcebralign:
 	adc	cx, 0
 	jmp	.calcmaxfat
 .isprimary:
+	test	[passedopts], byte 64
+	jnz	.isprimary_noreduce
+	call	calchostreduce
+.isprimary_noreduce:
 	xor	bx, bx
 	mov	[diskebroffset], bx
 	mov	[diskebroffset + 2], bx
@@ -868,7 +948,27 @@ calcebralign:
 	mov	cx, [usabledisksize2 + 2]
 .finish	sub	bx, [diskebroffset]
 	sbb	cx, [diskebroffset + 2]
-	mov	[usabledisksize], bx
+	test	[passedopts], byte 64
+	jz	.nnt
+	test	[diskebr], byte 1
+	jz	.ntprimary
+	or	[diskebr], byte 2	; Pre-NTFS stops at 1 logical partition because it will be extended after conversion to NTFS
+	jmp	.nnt
+.ntprimary:
+	sub	bx, [hostlen]
+	sbb	cx, 0
+	push	bx
+	push	cx
+	call	getleadingsectors
+	xchg	ax, bx
+	mov	dx, cx
+	pop	cx
+	pop	bx
+	add	ax, bx
+	adc	dx, cx
+	mov	[hostnewoffset], ax
+	mov	[hostnewoffset + 2], dx
+.nnt	mov	[usabledisksize], bx
 	mov	[usabledisksize + 2], cx
 	call	getleadingsectors
 	mov	ds:[bp + 8], bx
@@ -897,6 +997,40 @@ cylinderaligncxbx:
 	sbb	cx, 0
 	jmp	.scan
 .found	ret
+
+calchostreduce:
+	cmp	[hostlen], word 0
+	je	.no
+	cmp	[di], word 512
+	je	.lba
+	push	ax
+	push	dx
+	call	chsdisksize
+	xchg	ax, bx
+	mov	cx, dx
+	pop	dx
+	pop	ax
+	jmp	.max
+.lba	xor	bx, bx
+	xor	cx, cx
+	cmp	[di + 12], bx
+	jne	.max
+	cmp	[di + 14], bx
+	jne	.max
+	mov	bx, [di + 8]
+	mov	cx, [di + 10]
+.max	sub	bx, [hostlen]
+	sbb	cx, word 0
+	mov	[hostnewoffset], bx
+	mov	[hostnewoffset + 2], cx
+	cmp	dx, cx
+	jb	.no
+	ja	.yes
+	cmp	ax, bx
+	jb	.no
+.yes	mov	ax, bx
+	mov	dx, cx
+.no	ret
 
 ; Calculate size of FAT partition, this entry point means FAT32 is permissible
 ; Input: BP = output area; DI = disktable
@@ -1936,9 +2070,13 @@ patchsuperblockmbr:
 	rep	stosw
 	pop	di	; Get disk table back
 	xor	cx, cx			; Generate MBR
-	mov	[es:1BEh], byte 80h
-	xor	ax, ax
-	
+	cmp	[hostlen], word 0
+	je	.noh
+	mov	[es:1BEh], byte 0
+	jmp	.gpp
+.noh	mov	[es:1BEh], byte 80h
+.gpp	xor	ax, ax
+
 	xor	si, si
 	mov	cx, bp
 	call	lineartochs
@@ -1983,7 +2121,40 @@ patchsuperblockmbr:
 	mov	[es:1CEh + 5], dh
 	mov	[es:1CEh + 6], cx
 .nbch	mov	[es:1FDh], byte 0
-	jmp	.final
+	cmp	[hostlen], word 0
+	je	.nhost
+	mov	ax, [hostnewoffset]
+	mov	dx, [hostnewoffset + 2]
+	mov	cx, [hostlen]
+	mov	[es:1DEh], byte 80h
+	mov	[es:1DEh + 8], ax
+	mov	[es:1DEh + 10], dx
+	mov	[es:1DEh + 12], cx
+	mov	[es:1DEh + 14], word 0
+
+	cmp	[di], word 512
+	jne	.hchs
+	mov	dl, [disk]
+	call	diskhaslba
+	jc	.hchs
+	mov	[es:1DEh + 3], byte 1Eh
+	jmp	.nhost
+.hchs	mov	[es:1DEh + 3], byte 14h
+	push	ax
+	push	dx
+	call	lineartochsoroverflow
+	mov	[es:1DEh + 2], cx
+	mov	[es:1DEh + 1], dh
+	pop	dx
+	pop	ax
+	mov	cx, [hostlen]
+	dec	cx
+	add	ax, cx
+	adc	dx, word 0
+	call	lineartochsoroverflow
+	mov	[es:1DEh + 6], cx
+	mov	[es:1DEh + 5], dh
+.nhost	jmp	.final
 
 .ebr	mov	ax, [es:1Ch]	; Save distance to partition start
 	mov	dx, [es:1Eh]
@@ -2072,7 +2243,11 @@ patchsuperblockmbr:
 	pop	ax
 	sub	ax, [diskpriorebr]	; length of extended partition
 	sbb	dx, [diskpriorebr + 2] ; is size of disk - size of partition
-	mov	[es:1EEh + 12], ax
+	test	[passedopts], byte 64
+	jnz	.ntee
+	sub	ax, [hostlen]
+	sbb	dx, 0
+.ntee	mov	[es:1EEh + 12], ax
 	mov	[es:1EEh + 14], dx
 
 .nxnebr	mov	cx, [minclustsize]
@@ -2324,12 +2499,18 @@ getleadingsectors:
 	jae	.ret
 	;MS-DOS < 5.0 can't handle reserved sectors before the FAT. Adjust partition start to last
 	;location in SSD sector to avoid the problem. Rather than make this conditional, we just always do it.
-	add	bx, [minclustsizem]
+.off2	add	bx, [minclustsizem]
 	dec	bx
 .ret	ret
 .ebr	mov	bx, [diskebroffset]	; Starting from EBR
 	mov	cx, [diskebroffset + 2]
-	jmp	.off
+	test	[passedopts], byte 64
+	jz	.off
+	cmp	[oslevel], byte '5'
+	jb	.off2
+	add	bx, [minclustsizem]	; Don't overlay EBR and boot sector if will convert to NTFS
+	adc	cx, 0
+	ret
 
 ;Check if disk referenced by DL has LBA support
 ;Clobbers SI, AX
@@ -2523,7 +2704,7 @@ diskerror:
 	mov	dx, [si + 8]
 .chs	mov	[fat32spill], cx
 	mov	[fat32spill + 2], dx
-	mov	si, [s_derr + 10]
+	lea	si, [s_derr + 10]
 	call	.xreg8
 	inc	si
 	mov	ax, [fat32spill]
@@ -2761,6 +2942,7 @@ procmbrnbc:
 	mov	dh, [si + 1]
 	mov	cx, [si + 2]
 	mov	ah, [si + 4]
+	and	ah, 0EFh
 	cmp	ah, byte 0Ch
 	je	.lba
 	cmp	ah, byte 0Eh
@@ -2833,6 +3015,7 @@ procmbr:
 	mov	ah, [si + 4]
 	cmp	ah, byte 0B5h
 	je	.lba
+	and	ah, 0EFh
 	cmp	ah, byte 0Ch
 	je	.lba
 	cmp	ah, byte 0Eh
@@ -3414,9 +3597,64 @@ bootcheckdiskop:
 linearchsdiskop:
 	push	si
 	push	cx
+	push	bx
+	push	bp
+	mov	bp, sp
+	sub	sp, 8
+	mov	[bp - 4], cx
+	mov	[bp - 2], si
+	mov	[bp - 8], ax
+	mov	[bp - 6], ax
+
+;%define TESTTRACKOVERFLOW
+%ifndef TESTTRACKOVERFLOW
 	call	lineartochs
 	int	13h
+	jnc	.exit
+	; Try it track by track in case of buggy BIOS
+	; An error decoder used to live here but I've seen error codes not in the table
+	; before so I don't trust it.
+%endif
+
+.loop	mov	cx, [bp - 4]	; Big ol' routine to span tracks
+	mov	si, [bp - 2]
+	call	lineartochs
+	mov	al, [bp - 6]
+	mov	ah, cl
+	and	ah, 63
+	dec	ah
+	add	ah, al
+	cmp	ah, [di + 2]
+	jbe	.last
+
+	inc	ah
+	sub	ah, al
+	mov	al, [di + 2]
+	sub	al, ah
+	inc	al		; Remaining sectors this track
+	mov	ah, [bp - 5]
+	int	13h
+	jc	.error
+	mov	ah, 0
+	sub	[bp - 6], al
+	add	[bp - 4], ax
+	adc	[bp - 2], word 0
+	mov	cl, 9
+	shl	ax, cl
+	add	bx, ax
+	jmp	.loop
+
+.last	mov	ah, [bp - 5]
+	int	13h
+.error	mov	al, [bp - 8]
+.exit	mov	sp, bp
+	pop	bp
+	pop	bx
+	jc	.ret2
 	pop	cx
+	pop	si
+	ret
+.ret2	pop	si
 	pop	si
 	ret
 
@@ -3618,6 +3856,7 @@ bootcheck_end:
 s_name	db	0B5h, ' SSD Format ', 0C6h
 s_vsn	db	'1.8b'		; should start with v but this is unreleased checkpoint
 s_bootc	db	'B)  Boot check:'
+s_ntmod	db	'T)  Pre-NTFS:'
 s_on	db	'ON '
 s_off	db	'OFF'
 s_nomem	db	'Not enough RAM'
@@ -3751,7 +3990,10 @@ passeddisk	equ	bss + 112	; Argument: disk
 passedssize	equ	bss + 113	; Argument: sector size
 passedmdos	equ	bss + 114	; Argument: min dos
 passedopts	equ	bss + 115	; bit 0 = Y, bit 2 = omit disk check
-fat32spill	equ	bss + 116	; Size is currently 4 bytes
+hostoffset	equ	bss + 116	; Size = 4 bytes
+hostnewoffset	equ	bss + 120	; Size = 4 bytes
+hostlen		equ	bss + 124	; Size = 2 bytes
+fat32spill	equ	bss + 126	; Size is currently 4 bytes
 
 highmemoryreserve	equ	192 - 32	; DOS kernel high + command line history eats into high memory
 
