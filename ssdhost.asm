@@ -9,7 +9,7 @@
 ; int13h ah=0 ; chain
 ; int13h ah=42h ds:[si] = 12h ds:[si + 2] = 0; ds:[si + 10h] = AABBh
 ;	This API reports we exist and our status
-;	Sets ds:[si + 10h] = ABABh; ds:[si + 2] = number of sectors (including bootstrap), ds:[si + 4] = starting sector, dl = underlying
+;	Sets ds:[si + 10h] = ABABh; ds:[si + 2] = number of sectors (including bootstrap), ds:[si + 8] = starting sector, dl = underlying
 ; int13h ah=43h ds:[si] = 12h ds:[si + 2] = 0; ds:[si + 10h] = AABBh
 ;	al=0 Relocate here (buffer parameter is used; sector size is of buffer is 1 sector)
 ;	al=7F set readwrite   al=FF set readonly
@@ -90,6 +90,8 @@ loader:
 	int	12h
 %ifdef FREEDOS
 	cmp	ax, 159
+%elifdef DOS3
+	cmp	ax, 126
 %else
 	cmp	ax, 48
 %endif
@@ -216,9 +218,10 @@ loader:
 .chsend	ret
 %ifdef FREEDOS
 .rmsg	db	"Insufficient RAM (need 159K)", 0
+%elifdef DOS3
+.rmsg	db	"Insufficient RAM (need 126K)", 0
 %else
-	int3
-.rmsg	db	"Insufficient RAM (need 48K)", 0
+.rmsg	db	"Insufficient RAM (need 48K)", 0, 0
 %endif
 .dmsg	db	"Error reading SSD", 0
 	; End of code that must exist in the first sector
@@ -244,8 +247,9 @@ loader:
 	xchg	dx, [si + 2]
 	ret
 
-	times	503 - ($ - _loader) db 0
-.ldr_type	db	0	; 503
+	times	501 - ($ - _loader) db 0
+.ldr_type	db	0	; 501
+.ldr_wait	dw	0	; 502
 .ldr_sectors	dw	18	; 504
 .ldr_heads	dw	2	; 506
 .ldr_cyls	dw	1	; 508
@@ -265,9 +269,33 @@ loader:
 
 .menu	mov	si, 7C00h + .menutext - _loader
 	call	.tty
-.key	mov	ah, 0
+.key	mov	di, [ss:7C00h + .ldr_wait - _loader]
+	test	di, di
+	jz	.keyw
+	xor	si, si
+	mov	ah, 0
+	int	1Ah
+	add	di, dx
+	adc	si, cx
+	cmp	si, 18h
+	jb	.nov
+	cmp	di, 0B0h
+	jb	.nov
+	sub	di, 0B0h
+	sbb	si, 18h
+.nov	mov	ah, 1
 	int	16h
-	cmp	al, '1'
+	jnz	.keyz
+	mov	ah, 0
+	int	1Ah
+	cmp	cx, si
+	jb	.nov
+	cmp	dx, di
+	jb	.nov
+	jmp	.normal
+.keyw	mov	ah, 0
+	int	16h
+.keyz	cmp	al, '1'
 	je	.normal
 	cmp	al, '2'
 	je	.emergency
@@ -672,7 +700,8 @@ int13h_entry:
 	push	bx
 	push	bp
 	mov	bp, sp
-	sub	sp, 12
+	sub	sp, 16
+%define offsetdest2	bp - 16
 %define offsetdelta	bp - 12
 %define offsetsrc	bp - 8
 %define offsetdest	bp - 4
@@ -680,12 +709,14 @@ int13h_entry:
 	mov	dx, [es:si + 10]
 	mov	[offsetdest], cx
 	mov	[offsetdest + 2], dx
+	mov	[offsetdest2], cx
+	mov	[offsetdest2 + 2], dx
 	mov	cx, [offset]
 	mov	dx, [offset + 2]
 	mov	[offsetsrc], cx
 	mov	[offsetsrc + 2], dx
 	les	bx, [es:si + 4]
-	mov	si, [floppy_sectors]
+	mov	si, [floppy_size]
 	add	si, 4
 	sti			; Interrupts are on for the copy loop
 	cmp	dx, [offsetdest + 2]
@@ -734,20 +765,19 @@ int13h_entry:
 	mov	ah, 0
 	clc
 .lbamoveexit:
+	mov	cx, [offsetdest2]
+	mov	dx, [offsetdest2 + 2]
 	cli
+	mov	[offset], cx
+	mov	[offset + 2], dx
 %undef	offsetdelta
 %undef	offsetsrc
 %undef	offsetdest
+%undef	offsetdest2
 	mov	sp, bp
 	pop	bp
 	pop	bx
 	pop	si
-	jc	.lbamoveexit2
-	mov	cx, [es:si + 8]
-	mov	dx, [es:si + 10]
-	mov	[offset], cx
-	mov	[offset + 2], dx
-.lbamoveexit2:
 	pop	es
 	jmp	.keepc_iret
 

@@ -2,26 +2,33 @@ CPU 8086
 ORG 100h
 
 _start:
+	mov	bh, 0
+	mov	bl, [80h]
+	mov	[bx + 81h], byte 13
 	cmp	sp, _end + 15 + 1536
 	jae	.ram
 	mov	dx, ram
 	mov	bl, 3
 	jmp	outstr
+.waitv	jmp	waitf
 .ram	mov	bx, _end
 	mov	ax, ds
 	mov	cl, 4
 	shl	ax, cl
 	add	ax, bx
 	cmp	ax, 0E000h
-	jne	.keep
+	jbe	.keep
 	add	bx, 512
 .keep	mov	si, 81h
 .next	lodsb
 	cmp	al, ' '
 	je	.next
-	cmp	al, 9
-	je	.next
 	dec	si
+	mov	cl, 0
+	mov	di, $wait
+	call	strxcmp
+	je	.waitv
+	mov	cl, 13
 	mov	di, rw1
 	call	strxcmp
 	je	readwrite
@@ -64,16 +71,13 @@ rorw:
 	cmp	ah, 1
 	jne	.error2
 .noemu	mov	dx, noemu
-.error2	jmp	outstr
+.error2	mov	bl, 1
+	jmp	outstr
 
-showf	mov	si, dap
-	xor	dx, dx
-	mov	[si], word 12h
-	mov	[si + 2], dx
-	mov	[si + 10h], word 0AABBh
-	mov	ax, 4200h
-	int	13h
+showf	call	getinfo
 	jc	rorw.noemu
+	cmp	[si + 10h], word 0ABABh
+	jne	rorw.noemu
 	mov	dh, 0
 	mov	cx, 1
 	mov	ax, 0201h
@@ -100,19 +104,67 @@ showf	mov	si, dap
 	loop	.loop
 	ret
 
+waitf	add	si, 5
+	mov	cx, 10
+	xor	di, di
+	mov	ah, 0
+.ws	lodsb
+	cmp	al, 13
+	je	.arg
+	cmp	al, 32
+	je	.ws
+.dig	sub	al, '0'
+	jb	.arg
+	cmp	al, 9
+	ja	.arg
+	xchg	ax, di
+	mul	cx
+	xchg	ax, di
+	add	di, ax
+	lodsb
+	cmp	al, 13
+	je	.go
+	cmp	al, 32
+	je	.go
+	jmp	.dig
+.arg	mov	dx, waitarg
+	jmp	error
+.go	xchg	ax, di
+	mov	di, 182
+	mul	di
+	div	cx
+	xchg	ax, di
+	call	getinfo
+.noemuc	jc	short noemuv
+	cmp	[si + 10h], word 0ABABh
+.noemue	jne	short noemuv
+	mov	[si], byte 10h
+	mov	[si + 2], word 1
+	mov	[si + 4], bx
+	mov	[si + 6], ds
+	mov	ah, 42h
+	int	13h
+	jnc	.cc1
+	call	lbadap
+	jc	.error
+.cc1	mov	[bx + 502], di	; Wait timer
+	mov	ax, 4300h
+	int	13h
+	jnc	.cc2
+	call	lbadap
+	jc	.error
+.cc2	ret
+.error	mov	dx, error
+	mov	bl, 1
+	jmp	outstr
+noemuv	jmp	rorw.noemu
 ask	mov	dx, copy
 	mov	ah, 9
 	int	21h
-	mov	si, dap
-	xor	dx, dx
-	mov	[si], word 12h
-	mov	[si + 2], dx
-	mov	[si + 10h], word 0AABBh
-	mov	ax, 4200h
-	int	13h
-	jc	rorw.noemu
+	call	getinfo
+	jc	noemuv
 	cmp	[si + 10h], word 0ABABh
-	jc	rorw.noemu
+	jne	noemuv
 	mov	dh, al
 	mov	[86h], dx
 	mov	cx, [si + 2]
@@ -242,6 +294,55 @@ outstr	mov	ah, 9
 	mov	al, bl
 	int	21h
 	ret		; DOS1
+getinfo	mov	si, dap
+	xor	dx, dx
+	mov	[si], word 12h
+	mov	[si + 2], dx
+	mov	[si + 10h], word 0AABBh
+	mov	ax, 4200h
+	int	13h
+	ret
+lbadap	push	cx
+	push	di
+	push	es
+	mov	[si + 20], ah
+	mov	[si + 21], dl
+	xor	di, di
+	mov	es, di
+	mov	ah, 8
+	int	13h
+	pop	es
+	pop	di
+	and	cx, 63
+	mov	[si + 16], cx
+	mov	dl, dh
+	mov	dh, 0
+	inc	dx
+	mov	[si + 18], dx
+	xor	dx, dx
+	mov	ax, [si + 10]
+	div	word [si + 16]
+	xchg	ax, bx
+	mov	ax, [si + 8]
+	div	word [si + 16]
+	mov	cl, dl
+	inc	cl
+	mov	dx, bx
+	div	word [si + 18]
+	mov	dh, dl
+	mov	dl, [si + 21]
+	xchg	al, ah
+	ror	al, 1
+	ror	al, 1
+	or	cx, ax
+	mov	ah, [si + 20]
+	and	ah, 0Fh		; Shortcuts taken: only handles operations 2 & 3, DS=ES
+	mov	al, 1		; Only ever transfers one sector
+	mov	bx, [si + 4]
+	mov	dl, [si + 21]
+	int	13h
+	pop	cx
+	ret
 number:	xor	cx, cx
 	mov	bx, 10	; DX:AX = before
 .loop1	xchg	ax, si	; DX:SI = before
@@ -269,7 +370,7 @@ strxcmp:
 	cmp	al, [di]
 	jne	.ret
 	inc	di
-	cmp	al, 13
+	cmp	al, cl
 	jne	.loop
 .ret	pop	si
 	ret
@@ -278,12 +379,14 @@ copy	db	"SSD Floppy Emulator Query - Copyright (C) Joshua Hudson 2026", 13, 10, 
 ram	db	"Insufficient RAM", 13, 10, '$'
 noemu	db	"Not SSD Emulated floppy", 13, 10, '$'
 error	db	"SSD Error", 13, 10, '$'
+waitarg	db	"WAIT requires number", 13, 10, '$'
 ro1	db	15, "READONLY", 13
 rw1	db	15, "READWRITE", 13
 ro2	db	15, "RO", 13
 rw2	db	15, "RW", 13
 show	db	15, "SHOW", 13
 hide	db	15, "HIDE", 13
+$wait	db	15, "WAIT", 0
 emul1	db	"Emulating a "
 emut1	db	"5", 0ACh, " double density"
 emut2	db	"5", 0ACh, " high density"

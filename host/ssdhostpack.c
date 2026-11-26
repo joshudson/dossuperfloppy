@@ -2,6 +2,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 
 typedef unsigned char byte;
 typedef unsigned short word;
@@ -17,14 +18,21 @@ int main(int argc, char **argv)
 	byte tracks = 0;
 	word totalsectors = 0;
 	word bpblen;
+	word waitlen = 0;
 	
-	if (argc > 1 && (!strcmp(argv[1], "-ro") || !strcmp(argv[1], "-readonly"))) {
-		type |= 0x80;
-		argc -= 1;
-		argv += 1;
+	while (argc > 1) {
+		if ((!strcmp(argv[1], "-ro") || !strcmp(argv[1], "-readonly"))) {
+			type |= 0x80;
+			argc -= 1;
+			argv += 1;
+		} else if (argc > 2 && !strcmp(argv[1], "-wait")) {
+			waitlen = (atoi(argv[2]) * 182) / 10;
+			argc -= 2;
+			argv += 2;
+		} else break;
 	}
 	if (argc != 4) {
-		fprintf(stderr, "Usage: ssdhostpack [-readonly] ssdhost.bin floppy.img hdstarter.img\n");
+		fprintf(stderr, "Usage: ssdhostpack [-readonly] [-wait secs] ssdhost.bin floppy.img hdstarter.img\n");
 		return 2;
 	}
 	FILE *bin = fopen(argv[1], "rb");
@@ -101,7 +109,7 @@ int main(int argc, char **argv)
 					type |= 3; /* 3.5 double density */
 				else if (sectors <= 15)
 					type |= 2; /* 5.25 high density */
-				else if (sectors < 21)
+				else if (sectors <= 21)
 					type |= 4; /* 3.5 high density */
 				else
 					type |= 5; /* 3.5 extended density */
@@ -242,7 +250,9 @@ int main(int argc, char **argv)
 		if (sectorsleft == 4) {
 			word reserved = fbuffer[0x0E] + ((word)fbuffer[0x0F] << 8) + 4;
 			word len = totalsectors + 4;
-			pracbuf[503] = type;
+			pracbuf[501] = type;
+			pracbuf[502] = waitlen & 0xFF;
+			pracbuf[503] = (waitlen >> 8);
 			pracbuf[504] = sectors;
 			pracbuf[506] = heads;
 			pracbuf[508] = tracks;

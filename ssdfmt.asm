@@ -485,10 +485,12 @@ havedisk:
 	mov	ah, 42h
 	int	13h
 	jc	.nhost
+	cmp	[si + 10h], word 0ABABh
+	jne	.nhost
 	cmp	dl, [disk]
 	jne	.nhost
-	mov	ax, [si + 4]
-	mov	dx, [si + 6]
+	mov	ax, [si + 8]
+	mov	dx, [si + 10]
 	mov	si, [si + 2]
 	mov	[hostoffset], ax
 	mov	[hostoffset + 2], dx
@@ -502,22 +504,21 @@ havedisk:
 	mov	ax, 0201h
 	int	13h
 	jc	short .error
-	cmp	[es:bx + 510], word 0AA55h
-	jne	.novrchk
-	cmp	[es:bx + 1BEh + 4], byte 0
-	je	.ovrchk
-	cmp	[es:bx + 1CEh + 4], byte 0
-	je	.ovrchk
-	cmp	[es:bx + 1DEh + 4], byte 0
-	je	.ovrchk
-	cmp	[es:bx + 1EEh + 4], byte 0
-	jne	short .novrchk
-.ovrchk:
 	mov	al, [passedopts]
 	and	[passedopts], byte 0FEh
 	test	al, byte 1
 	jnz	.novrchk
-	push	ds
+	cmp	[es:bx + 510], word 0AA55h
+	jne	.novrchk
+	cmp	[es:bx + 1BEh + 4], byte 0
+	jne	.ovrchk
+	cmp	[es:bx + 1CEh + 4], byte 0
+	jne	.ovrchk
+	cmp	[es:bx + 1DEh + 4], byte 0
+	jne	.ovrchk
+	cmp	[es:bx + 1EEh + 4], byte 0
+	je	short .novrchk
+.ovrchk	push	ds
 	pop	es
 	push	dx
 	mov	si, s_data1
@@ -2134,12 +2135,16 @@ patchsuperblockmbr:
 
 	cmp	[di], word 512
 	jne	.hchs
+	push	ax
+	push	dx
 	mov	dl, [disk]
 	call	diskhaslba
+	pop	dx
+	pop	ax
 	jc	.hchs
-	mov	[es:1DEh + 3], byte 1Eh
+	mov	[es:1DEh + 4], byte 1Eh
 	jmp	.nhost
-.hchs	mov	[es:1DEh + 3], byte 14h
+.hchs	mov	[es:1DEh + 4], byte 14h
 	push	ax
 	push	dx
 	call	lineartochsoroverflow
@@ -3890,7 +3895,7 @@ s_flba	db	'6) Force LBA (95 OSR2)'
 s_derr	db	'SSD Error xx xxxx xxxx'
 s_sysc	db	'Run SYS C: first. Press any key to reboot.'
 s_nbebr	db	'Impossible to boot an EBR by normal means.'
-s_rderr	db	'SDD Read Error'
+s_rderr	db	'SSD Read Error'
 s_nptr	db	'No Boot Part'
 s_rebootmsg	db	'Reboot DOS to reread partition table', 13, 10, '$'
 
