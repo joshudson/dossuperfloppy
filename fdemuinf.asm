@@ -16,7 +16,7 @@ _start:
 	mov	cl, 4
 	shl	ax, cl
 	add	ax, bx
-	cmp	ax, 0E000h
+	cmp	ax, 0FE00h
 	jbe	.keep
 	add	bx, 512
 .keep	mov	si, 81h
@@ -163,9 +163,11 @@ ask	mov	dx, copy
 	int	21h
 	call	getinfo
 	jc	noemuv
+	cmp	[si + 10h], word 0AAAAh	; Non-booting emulator
+	je	.nbemu			; Reserved for future use
 	cmp	[si + 10h], word 0ABABh
 	jne	noemuv
-	mov	dh, al
+.nbemu	mov	dh, al
 	mov	[86h], dx
 	mov	cx, [si + 2]
 	mov	ax, [si + 8]
